@@ -1,0 +1,96 @@
+---
+title: Introduction
+description: HTTPower is a production-ready HTTP client library for Elixir that adds reliability patterns and enterprise features on top of existing HTTP clients.
+---
+
+HTTPower is a production-ready HTTP client library for Elixir. It sits above your existing HTTP client — Finch, Req, or Tesla — and adds the reliability patterns you need in production: circuit breakers, rate limiting, PCI-compliant logging, smart retries, request deduplication, and comprehensive telemetry.
+
+## Why HTTPower?
+
+Elixir's HTTP ecosystem has excellent clients, but each solves a different problem:
+
+- **Finch** gives you high-throughput connection pooling built on Mint
+- **Req** gives you batteries-included convenience with auto-JSON and compression
+- **Tesla** gives you a composable middleware pipeline
+
+None of them give you production reliability out of the box. When you call a payment gateway, a third-party API, or a downstream microservice, you need circuit breakers to stop cascading failures, rate limiting to respect API quotas, retries with exponential backoff, and logs that don't leak card numbers.
+
+HTTPower adds all of that as a consistent layer above whichever HTTP client you already use.
+
+## Key features
+
+<Columns cols={2}>
+  <Card title="Circuit breaker" icon="shield-halved">
+    Automatic failure detection with closed, open, and half-open states. Stops cascading failures when downstream services degrade.
+  </Card>
+  <Card title="Rate limiting" icon="gauge">
+    Token bucket algorithm with per-endpoint configuration. Supports `:wait` and `:error` strategies with server-header synchronization.
+  </Card>
+  <Card title="PCI-compliant logging" icon="eye-slash">
+    Automatic sanitization of Authorization headers, credit card numbers, CVV codes, passwords, and API keys. Structured metadata for Datadog, Splunk, ELK, and Loki.
+  </Card>
+  <Card title="Smart retries" icon="rotate">
+    Exponential backoff with jitter and `Retry-After` header support. Retries 408, 429, and 5xx responses. Never double-retries when using Req.
+  </Card>
+  <Card title="Request deduplication" icon="copy">
+    In-flight request fingerprinting to prevent duplicate charges or resource creation from double-clicks and race conditions.
+  </Card>
+  <Card title="Telemetry" icon="chart-line">
+    Comprehensive `:telemetry` events for requests, retries, rate limits, circuit breaker state changes, and deduplication. Integrates with Prometheus and OpenTelemetry.
+  </Card>
+  <Card title="Multi-adapter" icon="plug">
+    Choose Finch (default), Req, or Tesla. HTTPower's reliability features work identically across all three. Swap adapters with one config change.
+  </Card>
+  <Card title="Clean error handling" icon="circle-check">
+    Never raises exceptions for HTTP operations. All methods return `{:ok, response}` or `{:error, error}` tuples, keeping your application stable when external services fail.
+  </Card>
+</Columns>
+
+## When to use HTTPower
+
+**Payment processing** — PCI-compliant logging sanitizes card numbers, CVV codes, and authorization headers automatically. Circuit breakers prevent your checkout flow from hanging when a payment gateway degrades. Deduplication stops double-charges from impatient users.
+
+**High-volume API integrations** — Rate limiting with token bucket keeps you within API quotas. Smart retries with jitter spread load during 429 bursts. Telemetry gives you per-endpoint request rates and durations.
+
+**Microservices** — Per-service circuit breakers with isolated keys prevent one failing service from taking down others. Correlation IDs trace requests across service boundaries in distributed logs.
+
+## Architecture overview
+
+HTTPower has two layers:
+
+**Adapter layer** — A thin behaviour (`HTTPower.Adapter`) that normalizes request and response shapes across Finch, Req, and Tesla. Each adapter translates HTTPower's standardized options to the underlying client's format.
+
+**Middleware pipeline** — HTTPower's reliability features run above the adapter. When you call `HTTPower.get/2`, the request passes through rate limiting, circuit breaker, and deduplication checks before reaching the adapter. Retry logic wraps the adapter call and re-executes on failure.
+
+```
+HTTPower.get(url, opts)
+        │
+        ▼
+┌─────────────────────┐
+│  Rate limiter       │  Token bucket, wait/error strategies
+├─────────────────────┤
+│  Circuit breaker    │  Closed → Open → Half-open state machine
+├─────────────────────┤
+│  Deduplication      │  In-flight fingerprint tracking
+├─────────────────────┤
+│  Retry logic        │  Exponential backoff with jitter
+├─────────────────────┤
+│  Adapter            │  Finch / Req / Tesla
+└─────────────────────┘
+        │
+        ▼
+{:ok, %HTTPower.Response{}} | {:error, %HTTPower.Error{}}
+```
+
+Configuration flows from global application config → per-client options → per-request options, with more specific values always taking precedence.
+
+## Get started
+
+<Columns cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Add HTTPower to your project and make your first request in five minutes.
+  </Card>
+  <Card title="Adapters" icon="plug" href="/adapters">
+    Choose between Finch, Req, and Tesla adapters and understand the tradeoffs.
+  </Card>
+</Columns>

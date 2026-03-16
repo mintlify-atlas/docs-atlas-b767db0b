@@ -1,0 +1,966 @@
+---
+title: API reference
+description: Complete reference for all public modules and functions in HTTPower.
+---
+
+This page documents every public function and struct in HTTPower. All HTTP methods return `{:ok, %HTTPower.Response{}}` on a server response (any status code) or `{:error, %HTTPower.Error{}}` on a transport failure. HTTPower never raises exceptions for HTTP operations.
+
+---
+
+## HTTPower
+
+The main module. Use it directly for one-off requests or create a pre-configured client with `new/1` for reuse.
+
+### new/1
+
+Creates a reusable client struct with pre-configured options.
+
+```elixir
+@spec new(keyword()) :: HTTPower.t()
+```
+
+<Warning>
+  Raises `ArgumentError` at construction time if you pass an unknown `:profile` value. All other configuration errors surface at request time as `{:error, %HTTPower.Error{}}`.
+</Warning>
+
+<AccordionGroup>
+  <Accordion title="Options">
+    <ParamField path="base_url" type="string">
+      Base URL prepended to all paths passed to request functions. Trailing slashes are handled automatically.
+    </ParamField>
+    <ParamField path="profile" type="atom">
+      Pre-configured profile. One of `:payment_processing`, `:high_volume_api`, or `:microservices_mesh`. Profile settings are merged with explicit options; explicit options always win. See [HTTPower.Profiles](#httpower-profiles).
+    </ParamField>
+    <ParamField path="timeout" type="integer" default="60">
+      Request timeout in seconds.
+    </ParamField>
+    <ParamField path="max_retries" type="integer" default="3">
+      Maximum number of retries after the initial attempt.
+    </ParamField>
+    <ParamField path="retry_safe" type="boolean" default="false">
+      Enable retries for connection resets.
+    </ParamField>
+    <ParamField path="ssl_verify" type="boolean" default="true">
+      Enable SSL certificate verification.
+    </ParamField>
+    <ParamField path="proxy" type="atom | keyword" default=":system">
+      Proxy configuration. Defaults to system proxy settings.
+    </ParamField>
+    <ParamField path="headers" type="map">
+      Default headers sent with every request. Per-request headers are merged on top.
+    </ParamField>
+    <ParamField path="rate_limit" type="keyword">
+      Rate limiting options. See [HTTPower.Middleware.RateLimiter](#httpower-middleware-ratelimiter).
+    </ParamField>
+    <ParamField path="circuit_breaker" type="keyword">
+      Circuit breaker options. See [HTTPower.Middleware.CircuitBreaker](#httpower-middleware-circuitbreaker).
+    </ParamField>
+    <ParamField path="deduplicate" type="boolean | keyword">
+      Deduplication options.
+    </ParamField>
+  </Accordion>
+  <Accordion title="Examples">
+    ```elixir
+    # Simple client with base URL
+    client = HTTPower.new(base_url: "https://api.example.com")
+
+    # Client with auth and timeouts
+    client = HTTPower.new(
+      base_url: "https://api.example.com",
+      headers: %{"Authorization" => "Bearer token"},
+      timeout: 30,
+      max_retries: 5
+    )
+
+    # Use a built-in profile
+    client = HTTPower.new(
+      base_url: "https://payment-gateway.com",
+      profile: :payment_processing
+    )
+
+    # Profile with per-client override
+    client = HTTPower.new(
+      base_url: "https://api.example.com",
+      profile: :high_volume_api,
+      rate_limit: [requests: 2000]
+    )
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### HTTP methods
+
+All HTTP methods share the same signature patterns and return type. Each method accepts either a URL string or a configured client as the first argument.
+
+**Signatures (shown for `get`; all methods follow the same pattern):**
+
+```elixir
+@spec get(String.t(), keyword()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+@spec get(HTTPower.t(), String.t()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+@spec get(HTTPower.t(), String.t(), keyword()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+```
+
+<AccordionGroup>
+  <Accordion title="get/2, get/3">
+    Makes an HTTP GET request.
+
+    ```elixir
+    # Direct URL
+    HTTPower.get("https://api.example.com/users")
+    HTTPower.get("https://api.example.com/users", headers: %{"Authorization" => "Bearer token"})
+
+    # Configured client
+    client = HTTPower.new(base_url: "https://api.example.com")
+    HTTPower.get(client, "/users")
+    HTTPower.get(client, "/users", timeout: 10)
+    ```
+  </Accordion>
+
+  <Accordion title="post/2, post/3">
+    Makes an HTTP POST request. Supports a `:body` option for the request body.
+
+    ```elixir
+    # Form-encoded body
+    HTTPower.post("https://api.example.com/users", body: "name=John")
+
+    # JSON body
+    HTTPower.post("https://api.example.com/users",
+      body: Jason.encode!(%{name: "John"}),
+      headers: %{"Content-Type" => "application/json"}
+    )
+
+    # Configured client
+    client = HTTPower.new(base_url: "https://api.example.com")
+    HTTPower.post(client, "/users", body: %{name: "John"})
+    ```
+  </Accordion>
+
+  <Accordion title="put/2, put/3">
+    Makes an HTTP PUT request. Supports a `:body` option.
+
+    ```elixir
+    HTTPower.put("https://api.example.com/users/1", body: "name=John")
+
+    client = HTTPower.new(base_url: "https://api.example.com")
+    HTTPower.put(client, "/users/1", body: %{name: "John"})
+    ```
+  </Accordion>
+
+  <Accordion title="patch/2, patch/3">
+    Makes an HTTP PATCH request. Supports a `:body` option.
+
+    ```elixir
+    HTTPower.patch("https://api.example.com/users/1", body: "name=Jane")
+
+    client = HTTPower.new(base_url: "https://api.example.com")
+    HTTPower.patch(client, "/users/1", body: %{name: "Jane"})
+    ```
+  </Accordion>
+
+  <Accordion title="delete/2, delete/3">
+    Makes an HTTP DELETE request. Supports a `:body` option.
+
+    ```elixir
+    HTTPower.delete("https://api.example.com/users/1")
+
+    client = HTTPower.new(base_url: "https://api.example.com")
+    HTTPower.delete(client, "/users/1")
+    ```
+  </Accordion>
+
+  <Accordion title="head/2, head/3">
+    Makes an HTTP HEAD request.
+
+    ```elixir
+    HTTPower.head("https://api.example.com/users")
+
+    client = HTTPower.new(base_url: "https://api.example.com")
+    HTTPower.head(client, "/users")
+    ```
+  </Accordion>
+
+  <Accordion title="options/2, options/3">
+    Makes an HTTP OPTIONS request.
+
+    ```elixir
+    HTTPower.options("https://api.example.com/users")
+
+    client = HTTPower.new(base_url: "https://api.example.com")
+    HTTPower.options(client, "/users")
+    ```
+  </Accordion>
+</AccordionGroup>
+
+#### Request options
+
+All HTTP method functions accept these options:
+
+<ParamField path="timeout" type="integer" default="60">
+  Request timeout in seconds.
+</ParamField>
+
+<ParamField path="max_retries" type="integer" default="3">
+  Maximum retries after the initial attempt.
+</ParamField>
+
+<ParamField path="retry_safe" type="boolean" default="false">
+  Enable retries for connection resets.
+</ParamField>
+
+<ParamField path="headers" type="map">
+  Request headers. When using a client, these merge with client-level headers; per-request values win on conflict.
+</ParamField>
+
+<ParamField path="body" type="string | map">
+  Request body. Used by `post`, `put`, `patch`, and `delete`.
+</ParamField>
+
+<ParamField path="ssl_verify" type="boolean" default="true">
+  Enable SSL certificate verification.
+</ParamField>
+
+<ParamField path="proxy" type="atom | keyword" default=":system">
+  Proxy configuration.
+</ParamField>
+
+<ParamField path="circuit_breaker_key" type="string">
+  Custom circuit breaker key for this request. Defaults to the URL host.
+</ParamField>
+
+<ParamField path="rate_limit_key" type="string">
+  Custom rate limit bucket key for this request. Defaults to the URL host.
+</ParamField>
+
+#### Return values
+
+```elixir
+case HTTPower.get("https://api.example.com/users") do
+  {:ok, %{status: status}} when status in 200..299 ->
+    # Success
+  {:ok, %{status: status} = response} ->
+    # Server responded with non-2xx (including 5xx after retries exhausted)
+  {:error, %HTTPower.Error{reason: reason}} ->
+    # Transport error: timeout, connection refused, etc.
+end
+```
+
+<Note>
+  `{:ok, response}` means the server responded — it does not mean the request succeeded in a business sense. 4xx and 5xx responses are returned as `{:ok, response}`. Always check `response.status`.
+</Note>
+
+---
+
+### test_mode?/0
+
+Returns `true` if HTTPower is in test mode.
+
+```elixir
+@spec test_mode?() :: boolean()
+```
+
+In test mode, real HTTP requests are blocked and return `{:error, %HTTPower.Error{reason: :network_blocked}}` unless the request includes a `:plug` option for mocking.
+
+```elixir
+Application.put_env(:httpower, :test_mode, true)
+HTTPower.test_mode?() # => true
+```
+
+---
+
+## HTTPower.Response
+
+The response struct returned inside `{:ok, response}` tuples.
+
+```elixir
+@type t :: %HTTPower.Response{
+  status: integer(),
+  headers: %{optional(String.t()) => [String.t()]},
+  body: term()
+}
+```
+
+<ResponseField name="status" type="integer" required>
+  HTTP status code, for example `200`, `404`, or `503`.
+</ResponseField>
+
+<ResponseField name="headers" type="map">
+  Response headers as a map of lowercase string keys to lists of string values, for example `%{"content-type" => ["application/json"]}`. This format is consistent across all adapters.
+</ResponseField>
+
+<ResponseField name="body" type="any">
+  Parsed response body. JSON responses are automatically decoded to maps. All other responses are returned as strings.
+</ResponseField>
+
+---
+
+## HTTPower.Error
+
+The error struct returned inside `{:error, error}` tuples. HTTPower only returns this for transport-level failures — not for 4xx/5xx HTTP responses.
+
+```elixir
+@type reason ::
+  atom()
+  | {:http_status, integer(), HTTPower.Response.t()}
+  | {:feature_error, module(), term()}
+
+@type t :: %HTTPower.Error{
+  reason: reason(),
+  message: String.t()
+}
+```
+
+<ResponseField name="reason" type="atom | tuple" required>
+  Machine-readable error reason.
+
+  <Expandable title="Common reason values">
+    <ResponseField name=":timeout" type="atom">
+      The request exceeded the configured timeout.
+    </ResponseField>
+    <ResponseField name=":econnrefused" type="atom">
+      The remote host refused the connection.
+    </ResponseField>
+    <ResponseField name=":econnreset" type="atom">
+      The connection was reset by the remote host.
+    </ResponseField>
+    <ResponseField name=":nxdomain" type="atom">
+      DNS resolution failed — the domain does not exist.
+    </ResponseField>
+    <ResponseField name=":closed" type="atom">
+      The connection was closed before the response was received.
+    </ResponseField>
+    <ResponseField name=":network_blocked" type="atom">
+      The request was blocked because test mode is enabled and no mock was registered.
+    </ResponseField>
+    <ResponseField name=":service_unavailable" type="atom">
+      The circuit breaker is open and the request was short-circuited.
+    </ResponseField>
+    <ResponseField name=":too_many_requests" type="atom">
+      The rate limiter rejected the request (strategy is `:error` or wait timeout exceeded).
+    </ResponseField>
+    <ResponseField name=":test_transport_error" type="atom">
+      A transport error was simulated via `HTTPower.Test.transport_error/2`.
+    </ResponseField>
+    <ResponseField name=":test_stub_error" type="atom">
+      An exception was raised inside a test stub function.
+    </ResponseField>
+    <ResponseField name=":dedup_timeout" type="atom">
+      A deduplicated request timed out waiting for the in-flight original request.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="message" type="string" required>
+  Human-readable description of the error.
+</ResponseField>
+
+---
+
+## HTTPower.Logger
+
+PCI-compliant request/response logging via telemetry. Attach it once at application startup and all HTTPower requests are automatically logged with sensitive data redacted.
+
+### attach/0, attach/1
+
+Attaches the logger as a telemetry event handler.
+
+```elixir
+@spec attach(keyword()) :: :ok | {:error, :already_exists}
+```
+
+<AccordionGroup>
+  <Accordion title="Options">
+    <ParamField path="level" type="atom" default=":info">
+      Log level. One of `:debug`, `:info`, `:warning`, or `:error`.
+    </ParamField>
+    <ParamField path="log_headers" type="boolean" default="true">
+      Include sanitized request and response headers in log output.
+    </ParamField>
+    <ParamField path="log_body" type="boolean" default="true">
+      Include sanitized request and response bodies in log output.
+    </ParamField>
+    <ParamField path="sanitize_headers" type="list">
+      Additional header names to redact (case-insensitive). These supplement the built-in defaults — they do not replace them.
+
+      Built-in defaults: `authorization`, `api-key`, `x-api-key`, `api_key`, `apikey`, `secret`, `token`, `x-auth-token`, `x-csrf-token`, `cookie`, `set-cookie`.
+    </ParamField>
+    <ParamField path="sanitize_body_fields" type="list">
+      Additional JSON body field names to redact. Supplements built-in defaults.
+
+      Built-in defaults: `password`, `passwd`, `pwd`, `secret`, `api_key`, `apikey`, `token`, `credit_card`, `creditcard`, `card_number`, `cardnumber`, `cvv`, `cvv2`, `cvc`, `pin`, `ssn`, `social_security`.
+    </ParamField>
+  </Accordion>
+  <Accordion title="Examples">
+    ```elixir
+    # In application.ex — use config defaults
+    def start(_type, _args) do
+      HTTPower.Logger.attach()
+      # ...
+    end
+
+    # Override at attach time
+    HTTPower.Logger.attach(
+      level: :debug,
+      log_body: false,
+      sanitize_headers: ["x-custom-secret"]
+    )
+    ```
+
+    You can also configure the logger via `config.exs`:
+
+    ```elixir
+    config :httpower, :logging,
+      level: :info,
+      log_headers: true,
+      log_body: true,
+      sanitize_headers: ["x-custom-secret"],
+      sanitize_body_fields: ["ssn"]
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### detach/0
+
+Detaches the logger from telemetry events.
+
+```elixir
+@spec detach() :: :ok | {:error, :not_found}
+```
+
+### generate_correlation_id/0
+
+Generates a unique correlation ID for request tracing.
+
+```elixir
+@spec generate_correlation_id() :: String.t()
+```
+
+Returns a string in the format `req_` followed by 16 lowercase hexadecimal characters (total length: 20). The logger automatically uses `Logger.metadata()[:request_id]` (set by Phoenix) if available, falling back to a freshly generated ID.
+
+```elixir
+id = HTTPower.Logger.generate_correlation_id()
+# => "req_4a7f2b1c9e3d5f80"
+```
+
+### sanitize_headers/1
+
+Sanitizes a headers map by replacing sensitive values with `"[REDACTED]"`.
+
+```elixir
+@spec sanitize_headers(map()) :: map()
+```
+
+Header keys are normalized to lowercase. Values for headers in the sanitize list are replaced; all others are passed through unchanged.
+
+```elixir
+HTTPower.Logger.sanitize_headers(%{"Authorization" => "Bearer token123"})
+# => %{"authorization" => "[REDACTED]"}
+
+HTTPower.Logger.sanitize_headers(%{"Content-Type" => "application/json"})
+# => %{"content-type" => "application/json"}
+```
+
+### sanitize_body/1
+
+Sanitizes a request or response body.
+
+```elixir
+@spec sanitize_body(String.t() | map() | nil) :: String.t() | map() | nil
+```
+
+Handles string bodies (JSON or plain text), map bodies, and `nil`. Applies:
+- Luhn-validated credit card number redaction (13–19 digit sequences)
+- CVV pattern redaction
+- Configured field name redaction in JSON
+
+```elixir
+HTTPower.Logger.sanitize_body(~s({"password": "secret123"}))
+# => ~s({"password": "[REDACTED]"})
+
+HTTPower.Logger.sanitize_body("card: 4111111111111111")
+# => "card: [REDACTED]"
+```
+
+#### Structured log metadata
+
+Every log entry sets `Logger.metadata/0` with machine-readable fields for log aggregation systems:
+
+| Key | Event | Description |
+|-----|-------|-------------|
+| `httpower_correlation_id` | all | Unique request identifier |
+| `httpower_event` | all | `:request`, `:response`, or `:exception` |
+| `httpower_method` | request | HTTP method atom |
+| `httpower_url` | request | Request URL |
+| `httpower_headers` | request | Sanitized headers (if enabled) |
+| `httpower_body` | request | Sanitized body, truncated to 500 chars (if enabled) |
+| `httpower_status` | response | HTTP status code |
+| `httpower_duration_ms` | response, exception | Request duration in milliseconds |
+| `httpower_response_headers` | response | Sanitized response headers (if enabled) |
+| `httpower_response_body` | response | Sanitized response body (if enabled) |
+| `httpower_exception_kind` | exception | `:error`, `:exit`, or `:throw` |
+| `httpower_exception_reason` | exception | Inspected exception reason |
+
+---
+
+## HTTPower.Test
+
+Adapter-agnostic test helpers. Use these to mock HTTP requests without coupling to a specific adapter.
+
+<Note>
+  `HTTPower.Test` requires `plug` as a dependency. Add `{:plug, "~> 1.15", only: :test}` to your `mix.exs`.
+</Note>
+
+### setup/0
+
+Sets up HTTPower.Test for the current test process. Call this in `setup`.
+
+```elixir
+setup do
+  HTTPower.Test.setup()
+end
+```
+
+Registers the test process as a mock owner and schedules cleanup on test exit.
+
+### stub/1
+
+Registers a stub function to handle all HTTP requests in the current test.
+
+```elixir
+def stub(fun :: (Plug.Conn.t() -> Plug.Conn.t())) :: :ok
+```
+
+The stub receives a `Plug.Conn` and must return a `Plug.Conn` with a response set using the helper functions below.
+
+```elixir
+HTTPower.Test.stub(fn conn ->
+  case {conn.method, conn.request_path} do
+    {"GET", "/users"} ->
+      HTTPower.Test.json(conn, %{users: ["alice", "bob"]})
+
+    {"POST", "/users"} ->
+      HTTPower.Test.json(conn, %{created: true}, status: 201)
+
+    _ ->
+      HTTPower.Test.json(conn, %{error: "not found"}, status: 404)
+  end
+end)
+```
+
+<Warning>
+  You must call `HTTPower.Test.setup/0` before `stub/1`. Calling `stub/1` without `setup/0` raises a descriptive error.
+</Warning>
+
+### allow/2
+
+Allows another process to use the mock registered by the owner process.
+
+```elixir
+@spec allow(pid(), pid()) :: :ok
+```
+
+Use this for pre-existing processes (GenServers, Agents) that were started before the test and need to see the mock. Processes spawned from the test (`Task.async`, `spawn`) find the parent's mock automatically via `$callers` and do not need an explicit `allow/2` call.
+
+Allowances are transitive: if you allow a GenServer and it spawns a Task, the Task also sees the mock.
+
+```elixir
+setup do
+  HTTPower.Test.setup()
+  HTTPower.Test.allow(Process.whereis(MyApp.HttpWorker))
+end
+```
+
+### json/2, json/3
+
+Sends a JSON response.
+
+```elixir
+def json(conn :: Plug.Conn.t(), data :: term(), opts :: keyword()) :: Plug.Conn.t()
+```
+
+<ParamField path="conn" type="Plug.Conn.t()" required>
+  The connection from the stub function.
+</ParamField>
+
+<ParamField path="data" type="term" required>
+  Data to encode as JSON. Encoded with `Jason.encode!`.
+</ParamField>
+
+<ParamField path="opts" type="keyword">
+  <ParamField path="status" type="integer" default="200">
+    HTTP status code.
+  </ParamField>
+</ParamField>
+
+```elixir
+HTTPower.Test.json(conn, %{success: true})
+HTTPower.Test.json(conn, %{error: "not found"}, status: 404)
+```
+
+### html/2, html/3
+
+Sends an HTML response.
+
+```elixir
+def html(conn :: Plug.Conn.t(), data :: String.t(), opts :: keyword()) :: Plug.Conn.t()
+```
+
+<ParamField path="status" type="integer" default="200">
+  HTTP status code.
+</ParamField>
+
+```elixir
+HTTPower.Test.html(conn, "<h1>Hello</h1>")
+HTTPower.Test.html(conn, "<h1>Not Found</h1>", status: 404)
+```
+
+### text/2, text/3
+
+Sends a plain text response.
+
+```elixir
+def text(conn :: Plug.Conn.t(), data :: String.t(), opts :: keyword()) :: Plug.Conn.t()
+```
+
+<ParamField path="status" type="integer" default="200">
+  HTTP status code.
+</ParamField>
+
+```elixir
+HTTPower.Test.text(conn, "Hello, World!")
+HTTPower.Test.text(conn, "Not Found", status: 404)
+```
+
+### transport_error/2
+
+Simulates a network transport error inside a stub.
+
+```elixir
+def transport_error(conn :: Plug.Conn.t(), reason :: atom()) :: Plug.Conn.t()
+```
+
+<ParamField path="reason" type="atom" required>
+  The error to simulate. Must be one of:
+  - `:timeout` — request timeout
+  - `:closed` — connection closed
+  - `:econnrefused` — connection refused
+  - `:nxdomain` — DNS resolution failed
+
+  Passing any other value raises `ArgumentError`.
+</ParamField>
+
+The resulting `{:error, %HTTPower.Error{}}` will have `reason: :test_transport_error` and a message containing the simulated reason atom.
+
+```elixir
+HTTPower.Test.stub(fn conn ->
+  HTTPower.Test.transport_error(conn, :timeout)
+end)
+
+{:error, error} = HTTPower.get("https://api.example.com/slow")
+assert error.reason == :test_transport_error
+assert error.message =~ "timeout"
+```
+
+---
+
+## HTTPower.Middleware.CircuitBreaker
+
+GenServer-backed circuit breaker. Protects against cascading failures by short-circuiting requests to failing services.
+
+The circuit has three states:
+- **Closed** — requests pass through normally; failures are tracked
+- **Open** — all requests fail immediately with `:service_unavailable`
+- **Half-open** — a limited number of test requests are allowed; success closes the circuit, failure re-opens it
+
+### open_circuit/1
+
+Manually opens a circuit, causing all subsequent requests to fail immediately.
+
+```elixir
+@spec open_circuit(String.t()) :: :ok
+```
+
+```elixir
+HTTPower.Middleware.CircuitBreaker.open_circuit("payment_api")
+```
+
+### close_circuit/1
+
+Manually closes a circuit, allowing requests to pass through. Resets the request history and half-open counter.
+
+```elixir
+@spec close_circuit(String.t()) :: :ok
+```
+
+```elixir
+HTTPower.Middleware.CircuitBreaker.close_circuit("payment_api")
+```
+
+### reset_circuit/1
+
+Resets a circuit to its initial state, as if it had never been seen. Removes all history.
+
+```elixir
+@spec reset_circuit(String.t()) :: :ok
+```
+
+```elixir
+HTTPower.Middleware.CircuitBreaker.reset_circuit("payment_api")
+```
+
+### get_state/1
+
+Returns the current state of a circuit.
+
+```elixir
+@spec get_state(String.t()) :: :closed | :open | :half_open | nil
+```
+
+Returns `nil` if the circuit key has never been seen.
+
+```elixir
+HTTPower.Middleware.CircuitBreaker.get_state("payment_api")
+# => :closed | :open | :half_open | nil
+```
+
+#### Configuration
+
+```elixir
+config :httpower, :circuit_breaker,
+  enabled: true,
+  failure_threshold: 5,             # open after N absolute failures
+  failure_threshold_percentage: 50, # or open after N% failure rate
+  window_size: 10,                  # track last N requests
+  timeout: 60_000,                  # stay open for N ms
+  half_open_requests: 1             # allow N test requests in half-open
+```
+
+You can also configure per-client:
+
+```elixir
+client = HTTPower.new(
+  base_url: "https://api.example.com",
+  circuit_breaker: [failure_threshold: 3, timeout: 30_000]
+)
+```
+
+---
+
+## HTTPower.Middleware.RateLimiter
+
+Token bucket rate limiter. Each request consumes a token; tokens refill continuously at the configured rate.
+
+### update_from_headers/2
+
+Synchronizes the local token bucket with server-reported rate limit state from response headers.
+
+```elixir
+@spec update_from_headers(String.t(), map()) :: :ok
+```
+
+<ParamField path="bucket_key" type="string" required>
+  The bucket to update, typically the URL host.
+</ParamField>
+
+<ParamField path="rate_limit_info" type="map" required>
+  A map with `:remaining` (and optionally `:limit`, `:reset_at`, `:format`) as returned by `HTTPower.RateLimitHeaders.parse/1`.
+</ParamField>
+
+```elixir
+{:ok, info} = HTTPower.RateLimitHeaders.parse(response.headers)
+HTTPower.Middleware.RateLimiter.update_from_headers("api.github.com", info)
+```
+
+### get_info/1
+
+Returns current token bucket information for a key.
+
+```elixir
+@spec get_info(String.t()) :: map() | nil
+```
+
+Returns `nil` if the bucket does not exist. Otherwise returns:
+
+<ResponseField name="current_tokens" type="float">
+  Current number of available tokens.
+</ResponseField>
+
+<ResponseField name="last_refill_ms" type="integer">
+  Monotonic timestamp (milliseconds) of the last refill.
+</ResponseField>
+
+```elixir
+HTTPower.Middleware.RateLimiter.get_info("api.github.com")
+# => %{current_tokens: 55.0, last_refill_ms: 1234567890}
+```
+
+#### Configuration
+
+```elixir
+config :httpower, :rate_limit,
+  enabled: true,
+  requests: 100,        # max requests per window
+  per: :minute,         # :second | :minute | :hour
+  strategy: :wait,      # :wait | :error
+  max_wait_time: 5000,  # max ms to wait before returning error
+  adaptive: true        # reduce rate when circuit breaker is open
+```
+
+When `adaptive: true` is set, the rate is automatically adjusted based on the circuit breaker state:
+- **Circuit closed** → 100% rate
+- **Circuit half-open** → 50% rate
+- **Circuit open** → 10% rate
+
+---
+
+## HTTPower.RateLimitHeaders
+
+Parses rate limit headers from HTTP response headers into a structured format.
+
+### parse/1, parse/2
+
+Parses rate limit headers from a response headers map.
+
+```elixir
+@spec parse(map(), keyword()) :: {:ok, rate_limit_info()} | {:error, :not_found}
+```
+
+<ParamField path="headers" type="map" required>
+  The response headers map, for example `response.headers`.
+</ParamField>
+
+<ParamField path="opts" type="keyword">
+  <ParamField path="format" type="atom" default=":auto">
+    Header format to look for. One of:
+    - `:auto` — tries GitHub, RFC, then Stripe formats in order
+    - `:github` — `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`
+    - `:rfc` — `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`
+    - `:stripe` — `X-Stripe-RateLimit-*`
+    - `:retry_after` — `Retry-After` header only
+  </ParamField>
+</ParamField>
+
+On success, returns `{:ok, info}` where `info` is:
+
+<ResponseField name="limit" type="integer">
+  Maximum requests allowed in the window.
+</ResponseField>
+
+<ResponseField name="remaining" type="integer">
+  Requests remaining in the current window.
+</ResponseField>
+
+<ResponseField name="reset_at" type="DateTime.t()">
+  UTC datetime when the rate limit window resets.
+</ResponseField>
+
+<ResponseField name="format" type="atom">
+  The detected format: `:github`, `:rfc`, or `:stripe`.
+</ResponseField>
+
+```elixir
+headers = %{
+  "x-ratelimit-limit" => "60",
+  "x-ratelimit-remaining" => "55",
+  "x-ratelimit-reset" => "1234567890"
+}
+
+HTTPower.RateLimitHeaders.parse(headers)
+# => {:ok, %{limit: 60, remaining: 55, reset_at: ~U[2009-02-13 23:31:30Z], format: :github}}
+
+HTTPower.RateLimitHeaders.parse(headers, format: :github)
+# => {:ok, %{limit: 60, remaining: 55, reset_at: ~U[...], format: :github}}
+
+HTTPower.RateLimitHeaders.parse(%{})
+# => {:error, :not_found}
+```
+
+Header matching is case-insensitive. Values may be strings, integers, or lists (adapter-agnostic).
+
+---
+
+## HTTPower.Profiles
+
+Pre-configured option sets for common use cases. Pass a profile name to `HTTPower.new/1` via the `:profile` option.
+
+### get/1
+
+Returns the configuration keyword list for a profile.
+
+```elixir
+@spec get(atom()) :: {:ok, keyword()} | {:error, :unknown_profile}
+```
+
+```elixir
+HTTPower.Profiles.get(:payment_processing)
+# => {:ok, [rate_limit: [...], circuit_breaker: [...], ...]}
+
+HTTPower.Profiles.get(:invalid)
+# => {:error, :unknown_profile}
+```
+
+### list/0
+
+Returns the list of all available profile names.
+
+```elixir
+@spec list() :: [atom()]
+```
+
+```elixir
+HTTPower.Profiles.list()
+# => [:payment_processing, :high_volume_api, :microservices_mesh]
+```
+
+#### Available profiles
+
+<AccordionGroup>
+  <Accordion title=":payment_processing">
+    Conservative settings for payment gateways (Stripe, PayPal, etc.) where correctness matters more than speed.
+
+    - Rate limit: 100 req/min, adaptive, up to 5s wait
+    - Circuit breaker: 30% failure threshold, 30s timeout, 3 half-open requests
+    - Deduplication: enabled, 5s TTL — prevents double charges
+    - Retries: 3 retries, 2s base delay, 30s max delay
+
+    ```elixir
+    client = HTTPower.new(
+      base_url: "https://payment-gateway.com",
+      profile: :payment_processing
+    )
+    ```
+  </Accordion>
+
+  <Accordion title=":high_volume_api">
+    High-throughput settings for public APIs or internal services under heavy load.
+
+    - Rate limit: 1000 req/min, adaptive, up to 5s wait
+    - Circuit breaker: 50% failure threshold, 5s timeout, 10 half-open requests
+    - Deduplication: enabled, 1s TTL — response sharing across concurrent requests
+    - Retries: 2 retries, 500ms base delay, 10s max delay
+
+    ```elixir
+    client = HTTPower.new(
+      base_url: "https://api.example.com",
+      profile: :high_volume_api
+    )
+    ```
+  </Accordion>
+
+  <Accordion title=":microservices_mesh">
+    Balanced settings for service-to-service calls in a microservices architecture.
+
+    - Rate limit: 500 req/min, adaptive, up to 5s wait
+    - Circuit breaker: 40% failure threshold, 10s timeout, 5 half-open requests
+    - Deduplication: enabled, 2s TTL — prevents retry storms
+    - Retries: 3 retries, 1s base delay, 20s max delay
+
+    ```elixir
+    client = HTTPower.new(
+      base_url: "https://internal-service",
+      profile: :microservices_mesh
+    )
+    ```
+  </Accordion>
+</AccordionGroup>

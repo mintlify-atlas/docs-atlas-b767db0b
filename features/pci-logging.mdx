@@ -1,0 +1,256 @@
+---
+title: PCI-compliant logging
+description: Telemetry-based HTTP logging with automatic redaction of credit card numbers, auth tokens, passwords, and other sensitive data.
+---
+
+HTTPower's logger is an opt-in telemetry handler that logs every HTTP request and response with automatic PCI-compliant sanitization. Sensitive fields are redacted before they ever reach your log aggregation system—no custom configuration required to get safe defaults.
+
+## Setup
+
+Attach the logger in your application's `start/2` callback:
+
+```elixir
+# lib/my_app/application.ex
+defmodule MyApp.Application do
+  use Application
+
+  def start(_type, _args) do
+    HTTPower.Logger.attach()
+
+    children = [
+      # ... your supervision tree
+    ]
+
+    Supervisor.start_link(children, strategy: :one_for_one)
+  end
+end
+```
+
+With the logger attached, every request logs two lines:
+
+```
+[HTTPower] [req_a1b2c3d4e5f6g7h8] → POST https://api.payment.com/charges
+[HTTPower] [req_a1b2c3d4e5f6g7h8] ← 200 (142ms)
+```
+
+The correlation ID (`req_...`) ties the request and response lines together, even across concurrent requests.
+
+### Detaching
+
+```elixir
+HTTPower.Logger.detach()
+```
+
+You can also choose not to call `attach/0` at all—HTTPower never logs unless explicitly attached.
+
+## Configuration options
+
+Pass options to `attach/1` or set them via Application config:
+
+<Tabs>
+  <Tab title="attach/1 options">
+    ```elixir
+    HTTPower.Logger.attach(
+      level: :debug,
+      log_headers: true,
+      log_body: true,
+      sanitize_headers: ["x-custom-token"],       # Additional headers to redact
+      sanitize_body_fields: ["secret_answer"]     # Additional body fields to redact
+    )
+    ```
+  </Tab>
+  <Tab title="Application config">
+    Applied when you call `attach/0` with no arguments:
+
+    ```elixir
+    config :httpower, :logging,
+      level: :info,
+      log_headers: true,
+      log_body: true,
+      sanitize_headers: ["x-custom-token"],
+      sanitize_body_fields: ["secret_answer"]
+    ```
+  </Tab>
+</Tabs>
+
+<AccordionGroup>
+  <Accordion title="level">
+    **Type:** `:debug | :info | :warning | :error` — **Default:** `:info`
+
+    Logger level used for request and response log lines.
+  </Accordion>
+  <Accordion title="log_headers">
+    **Type:** `boolean` — **Default:** `true`
+
+    Include sanitized request and response headers in log output and structured metadata.
+  </Accordion>
+  <Accordion title="log_body">
+    **Type:** `boolean` — **Default:** `true`
+
+    Include sanitized request and response bodies in log output and structured metadata. Bodies over 500 characters are truncated.
+  </Accordion>
+  <Accordion title="sanitize_headers">
+    **Type:** `[String.t()]` — **Default:** `[]`
+
+    Additional header names to redact, beyond the built-in defaults. Values are merged with the default list—not replaced.
+  </Accordion>
+  <Accordion title="sanitize_body_fields">
+    **Type:** `[String.t()]` — **Default:** `[]`
+
+    Additional JSON body field names to redact, beyond the built-in defaults. Merged with defaults.
+  </Accordion>
+</AccordionGroup>
+
+## What gets sanitized
+
+Sanitization runs automatically on every logged request and response. You never need to opt in for the defaults to apply.
+
+### Headers
+
+The following header names are redacted (case-insensitive, value replaced with `"[REDACTED]"`): 
+
+```
+authorization    api-key         x-api-key       api_key
+apikey           secret          token           x-auth-token
+x-csrf-token     cookie          set-cookie
+```
+
+```elixir
+HTTPower.get("https://api.example.com/users",
+  headers: %{"Authorization" => "Bearer secret-token"}
+)
+# Logs: headers=%{"authorization" => "[REDACTED]"}
+```
+
+### Body fields
+
+The following JSON field names are redacted wherever they appear in the body:
+
+```
+password    passwd      pwd         secret      api_key
+apikey      token       credit_card creditcard  card_number
+cardnumber  cvv         cvv2        cvc         pin
+ssn         social_security
+```
+
+```elixir
+HTTPower.post("https://api.example.com/signup",
+  body: Jason.encode!(%{username: "alice", password: "hunter2"})
+)
+# Logs: body={"username": "alice", "password": "[REDACTED]"}
+```
+
+### Credit card numbers (Luhn algorithm)
+
+Any 13–19 digit sequence that passes the Luhn checksum is redacted, even if it appears in free-form text or an unrecognized field name:
+
+```elixir
+HTTPower.post("https://payment-api.com/charge",
+  body: ~s({"card": "4111111111111111", "amount": 100})
+)
+# Logs: body={"card": "[REDACTED]", "amount": 100}
+```
+
+Spaces and dashes within the digit sequence are ignored during matching: `4111 1111 1111 1111` and `4111-1111-1111-1111` are both caught.
+
+### CVV codes
+
+Patterns matching `cvv`, `cvc`, or `cvv2` followed by a 3–4 digit value are redacted:
+
+```
+cvv: 123      → cvv: [REDACTED]
+cvc: "456"    → cvc: [REDACTED]
+```
+
+<Tip>
+  Custom sanitization fields you provide via `sanitize_headers` and `sanitize_body_fields` are **additive**—they are merged with the defaults, not used as a replacement. You cannot accidentally remove built-in protections.
+</Tip>
+
+## Structured logging metadata
+
+All log entries set structured metadata via `Logger.metadata/1`, enabling rich queries in Datadog, Splunk, ELK, Loki, and similar systems.
+
+### Request metadata
+
+| Key | Type | Description |
+|---|---|---|
+| `httpower_correlation_id` | `string` | Unique `req_<16hex>` identifier for this request |
+| `httpower_event` | `:request` | Event type |
+| `httpower_method` | `atom` | HTTP method (`:get`, `:post`, etc.) |
+| `httpower_url` | `string` | Request URL |
+| `httpower_headers` | `map` | Sanitized request headers (if `log_headers: true`) |
+| `httpower_body` | `string` | Sanitized request body, truncated to 500 chars (if `log_body: true`) |
+
+### Response metadata
+
+| Key | Type | Description |
+|---|---|---|
+| `httpower_correlation_id` | `string` | Matches the request correlation ID |
+| `httpower_event` | `:response` | Event type |
+| `httpower_status` | `integer` | HTTP status code |
+| `httpower_duration_ms` | `integer` | End-to-end duration in milliseconds |
+| `httpower_response_headers` | `map` | Sanitized response headers (if `log_headers: true`) |
+| `httpower_response_body` | `string` | Sanitized response body, truncated to 500 chars (if `log_body: true`) |
+
+### Exception metadata
+
+| Key | Type | Description |
+|---|---|---|
+| `httpower_correlation_id` | `string` | Correlation ID |
+| `httpower_event` | `:exception` | Event type |
+| `httpower_duration_ms` | `integer` | Time elapsed before the exception |
+| `httpower_exception_kind` | `atom` | `:error`, `:exit`, or `:throw` |
+| `httpower_exception_reason` | `string` | Inspected exception reason |
+
+### Phoenix integration
+
+If your application uses Phoenix, the logger automatically reuses `Logger.metadata()[:request_id]` as the correlation ID, linking HTTPower log entries to the Phoenix request trace:
+
+```elixir
+# Phoenix plug sets request_id in Logger metadata
+# HTTPower reads it automatically — no configuration needed
+```
+
+## Log aggregation examples
+
+<Tabs>
+  <Tab title="Datadog">
+    ```
+    # Slow requests
+    @httpower_duration_ms:>1000
+
+    # All 5xx errors
+    @httpower_status:[500 TO *]
+
+    # Trace a specific request
+    @httpower_correlation_id:"req_a1b2c3d4e5f6g7h8"
+
+    # POST requests only
+    @httpower_method:post
+    ```
+  </Tab>
+  <Tab title="Splunk">
+    ```
+    # Slow requests
+    httpower_duration_ms > 1000
+
+    # All 5xx errors
+    httpower_status >= 500
+
+    # Trace a specific request
+    httpower_correlation_id="req_a1b2c3d4e5f6g7h8"
+    ```
+  </Tab>
+  <Tab title="ELK (Elasticsearch)">
+    ```json
+    // Slow requests
+    { "range": { "httpower_duration_ms": { "gt": 1000 } } }
+
+    // 5xx errors
+    { "range": { "httpower_status": { "gte": 500 } } }
+
+    // Specific correlation ID
+    { "term": { "httpower_correlation_id": "req_a1b2c3d4e5f6g7h8" } }
+    ```
+  </Tab>
+</Tabs>

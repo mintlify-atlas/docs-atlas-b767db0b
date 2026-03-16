@@ -1,0 +1,309 @@
+---
+title: Adapters
+description: HTTPower supports Finch, Req, and Tesla HTTP clients through a standardized adapter interface. Choose the adapter that fits your application.
+---
+
+HTTPower separates reliability features from HTTP transport through a behaviour called `HTTPower.Adapter`. Each adapter translates HTTPower's standardized request/response format to the underlying HTTP client and back. HTTPower's circuit breaker, rate limiting, retries, and logging work identically regardless of which adapter you use.
+
+## Choosing an adapter
+
+HTTPower checks which adapters are available at runtime and selects one in priority order: **Finch → Req → Tesla**. If multiple adapters are installed, Finch is used by default. You can override this globally in config, per client, or per request:
+
+```elixir
+# Global default in config/config.exs
+config :httpower, adapter: HTTPower.Adapter.Req
+
+# Per client
+client = HTTPower.new(
+  base_url: "https://api.example.com",
+  adapter: HTTPower.Adapter.Req
+)
+
+# Per request
+HTTPower.get("https://api.example.com/users", adapter: HTTPower.Adapter.Finch)
+```
+
+## Adapter comparison
+
+| Feature | Finch | Req | Tesla |
+|---|---|---|---|
+| Explicit connection pooling | Yes | No | Depends on Tesla adapter |
+| Auto JSON decode | Yes (via Jason) | Yes (built-in) | Depends on middleware |
+| Auto compression | No | Yes (gzip, brotli, zstd) | With middleware |
+| Req.Test compatibility | Via HTTPower.Test | Native | No |
+| Bring your own middleware | No | Limited | Yes |
+| HTTP/2 support | Yes | Yes | Depends on Tesla adapter |
+| Built-in retry disabled | N/A | Yes (HTTPower disables it) | Disable `Tesla.Middleware.Retry` |
+
+## Finch adapter
+
+The Finch adapter is the default. It uses [Finch](https://hex.pm/packages/finch), a performance-focused HTTP client built on [Mint](https://hex.pm/packages/mint) and [NimblePool](https://hex.pm/packages/nimble_pool). Finch gives you explicit control over connection pools, making it well-suited for high-throughput production scenarios.
+
+### Installation
+
+Add `finch` and `jason` to your `mix.exs`:
+
+```elixir mix.exs
+def deps do
+  [
+    {:httpower, "~> 0.20.0"},
+    {:finch, ">= 0.19.0"},
+    {:jason, "~> 1.4"}  # Required for auto JSON decode in Finch adapter
+  ]
+end
+```
+
+### Application setup
+
+Start a named Finch pool in your supervision tree. HTTPower's Finch adapter uses the pool named `HTTPower.Finch`:
+
+```elixir lib/my_app/application.ex
+children = [
+  {Finch, name: HTTPower.Finch},
+  # ...
+]
+```
+
+### Connection pool configuration
+
+Configure Finch pool settings globally via application config:
+
+```elixir config/config.exs
+config :httpower, :finch_pools,
+  default: [
+    size: 10,
+    count: System.schedulers_online(),
+    conn_opts: [
+      timeout: 5_000
+    ]
+  ]
+```
+
+- `size` — number of connections per pool
+- `count` — number of pools (defaults to the number of schedulers)
+- `conn_opts` — connection-level options passed to Mint
+
+### Request options
+
+The Finch adapter accepts these HTTPower options:
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `timeout` | integer | `60` | Request timeout in seconds |
+| `ssl_verify` | boolean | `true` | Enable SSL peer verification |
+| `proxy` | atom / keyword | `:system` | Proxy config. `:system` reads env vars, `nil` disables, or pass keyword options |
+
+### Usage
+
+```elixir
+# Uses Finch by default if installed
+HTTPower.get("https://api.example.com/users")
+
+# Explicit
+HTTPower.get("https://api.example.com/users", adapter: HTTPower.Adapter.Finch)
+```
+
+Finch automatically JSON-decodes response bodies using Jason. If the body is not valid JSON, it is returned as a binary string.
+
+## Req adapter
+
+The Req adapter uses [Req](https://hex.pm/packages/req), a batteries-included HTTP client with automatic JSON encoding/decoding, response decompression, and native `Req.Test` support.
+
+### Installation
+
+```elixir mix.exs
+def deps do
+  [
+    {:httpower, "~> 0.20.0"},
+    {:req, ">= 0.4.0"}
+  ]
+end
+```
+
+No application setup is required for Req — it manages connections internally.
+
+### Request options
+
+The Req adapter accepts these HTTPower options:
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `timeout` | integer | `60` | Request timeout in seconds |
+| `ssl_verify` | boolean | `true` | Enable SSL peer verification |
+| `proxy` | atom / keyword | `:system` | Proxy config |
+| `plug` | tuple | — | `{Req.Test, name}` for test mocking |
+
+Any Req-specific option not listed above (such as `connect_timeout`, `decode_body`, or `receive_timeout`) is passed through to Req directly.
+
+### Auto JSON handling
+
+Req automatically decodes JSON response bodies and encodes JSON request bodies when you set the `Content-Type` header to `application/json`.
+
+```elixir
+# Response body is automatically decoded to a map
+{:ok, response} = HTTPower.get("https://api.example.com/users",
+  adapter: HTTPower.Adapter.Req
+)
+# response.body => %{"users" => [...]}
+```
+
+### Built-in retry
+
+<Warning>
+  The Req adapter explicitly disables Req's built-in retry logic (`retry: false`). HTTPower's own retry logic — with exponential backoff, jitter, and `Retry-After` header support — is used instead. This prevents double-retrying.
+</Warning>
+
+### Testing with Req.Test
+
+The Req adapter integrates with `Req.Test` for request stubbing in tests:
+
+```elixir
+# In your test
+Req.Test.stub(MyApp, fn conn ->
+  Req.Test.json(conn, %{status: "success"})
+end)
+
+HTTPower.get("https://api.example.com",
+  adapter: HTTPower.Adapter.Req,
+  plug: {Req.Test, MyApp}
+)
+```
+
+### Usage
+
+```elixir
+# Explicit Req adapter
+HTTPower.get("https://api.example.com/users", adapter: HTTPower.Adapter.Req)
+
+# Per-client
+client = HTTPower.new(
+  base_url: "https://api.example.com",
+  adapter: HTTPower.Adapter.Req
+)
+HTTPower.get(client, "/users")
+```
+
+## Tesla adapter
+
+The Tesla adapter wraps an existing [Tesla](https://hex.pm/packages/tesla) client, letting you add HTTPower's reliability features to your current Tesla setup without rewriting your HTTP infrastructure. Your existing Tesla middleware — authentication, JSON encoding, custom headers, logging — continues to run unchanged.
+
+### Installation
+
+```elixir mix.exs
+def deps do
+  [
+    {:httpower, "~> 0.20.0"},
+    {:tesla, ">= 1.10.0"}
+  ]
+end
+```
+
+### Usage
+
+The Tesla adapter requires a Tesla client passed as a tuple with the adapter module:
+
+```elixir
+# Build your Tesla client as usual
+tesla_client = Tesla.client([
+  Tesla.Middleware.BaseUrl.new("https://api.example.com"),
+  Tesla.Middleware.JSON,
+  Tesla.Middleware.Logger
+])
+
+# Wrap it with HTTPower
+client = HTTPower.new(
+  adapter: {HTTPower.Adapter.Tesla, tesla_client}
+)
+
+# Make requests — Tesla middleware runs, HTTPower adds reliability
+{:ok, response} = HTTPower.get(client, "/users")
+```
+
+You can also define a Tesla module with `use Tesla`:
+
+```elixir
+defmodule MyApp.ApiClient do
+  use Tesla
+
+  plug Tesla.Middleware.BaseUrl, "https://api.example.com"
+  plug Tesla.Middleware.JSON
+  plug Tesla.Middleware.Headers, [{"authorization", "Bearer token"}]
+
+  # Expose client for HTTPower
+  def client, do: Tesla.client([])
+end
+
+# Wrap with HTTPower
+httpower_client = HTTPower.new(
+  adapter: {HTTPower.Adapter.Tesla, MyApp.ApiClient.client()},
+  circuit_breaker: [failure_threshold: 5],
+  rate_limit: [requests: 100, per: :second]
+)
+
+{:ok, response} = HTTPower.get(httpower_client, "/users")
+```
+
+### Middleware compatibility
+
+The Tesla adapter respects all middleware in your Tesla client:
+
+- Authentication middleware (Bearer, Basic, OAuth)
+- JSON encoding and decoding
+- Custom headers
+- Logging middleware
+- Compression
+
+<Warning>
+  If your Tesla client uses `Tesla.Middleware.Retry`, disable it. HTTPower's retry logic replaces it and the two will conflict, causing requests to be retried more times than intended.
+</Warning>
+
+### Testing
+
+Use `Tesla.Mock` for test stubs when using the Tesla adapter:
+
+```elixir
+Tesla.Mock.mock(fn
+  %{method: :get, url: "https://api.example.com/users"} ->
+    %Tesla.Env{status: 200, body: %{"users" => []}}
+end)
+```
+
+Alternatively, enable HTTPower's test mode to block all unmocked requests:
+
+```elixir
+# In test_helper.exs
+Application.put_env(:httpower, :test_mode, true)
+```
+
+## Custom adapters
+
+You can implement your own adapter by defining a module that implements the `HTTPower.Adapter` behaviour:
+
+```elixir
+defmodule MyApp.CustomAdapter do
+  @behaviour HTTPower.Adapter
+
+  @impl true
+  def request(method, url, body, headers, opts) do
+    # Make HTTP request using any HTTP client
+    # Return {:ok, %HTTPower.Response{}} or {:error, reason}
+    case my_http_client_request(method, url, body, headers) do
+      {:ok, %{status: status, headers: resp_headers, body: resp_body}} ->
+        {:ok, %HTTPower.Response{
+          status: status,
+          headers: resp_headers,
+          body: resp_body
+        }}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+end
+```
+
+Pass your adapter module in the `adapter` option:
+
+```elixir
+HTTPower.get("https://api.example.com", adapter: MyApp.CustomAdapter)
+```

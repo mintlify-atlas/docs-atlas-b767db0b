@@ -1,0 +1,396 @@
+---
+title: Configuration overview
+description: Complete reference for configuring HTTPower at the global, per-client, and per-request levels.
+---
+
+HTTPower supports configuration at three levels. Options set at a lower level override options set at a higher level:
+
+```
+Per-request options  >  Per-client options  >  Global configuration
+```
+
+This lets you set sensible defaults globally, override them per client, and fine-tune individual requests without touching everything else.
+
+<Warning>
+  The adapter selection and middleware pipeline (rate limiting, circuit breaker, deduplication) are cached at **compile time** via `Application.compile_env/3`. If you change these values in `config/config.exs`, you must recompile `HTTPower.Client` for the changes to take effect. Runtime options passed per-request always take precedence.
+</Warning>
+
+## Global configuration
+
+Set defaults for all requests in `config/config.exs`:
+
+```elixir config/config.exs
+config :httpower,
+  max_retries: 3,
+  retry_safe: false,
+  base_delay: 1000,
+  max_delay: 30_000,
+  timeout: 60,
+  ssl_verify: true,
+  proxy: :system,
+  adapter: HTTPower.Adapter.Finch
+
+# Rate limiting
+config :httpower, :rate_limit,
+  enabled: true,
+  requests: 100,
+  per: :minute,
+  strategy: :wait,
+  max_wait_time: 5000
+
+# Circuit breaker
+config :httpower, :circuit_breaker,
+  enabled: true,
+  failure_threshold: 5,
+  failure_threshold_percentage: nil,
+  window_size: 10,
+  timeout: 60_000,
+  half_open_requests: 1
+
+# Request deduplication
+config :httpower, :deduplicate,
+  enabled: true,
+  ttl: 500
+
+# Logging (attach separately via HTTPower.Logger.attach/0)
+config :httpower, :logging,
+  level: :info,
+  log_headers: true,
+  log_body: true
+```
+
+## Per-client configuration
+
+Pass options to `HTTPower.new/1` to create a pre-configured client:
+
+```elixir
+client = HTTPower.new(
+  base_url: "https://api.example.com",
+  headers: %{"Authorization" => "Bearer token"},
+  timeout: 30,
+  max_retries: 5,
+  retry_safe: true,
+  rate_limit: [requests: 60, per: :minute]
+)
+
+# Use the client for multiple requests
+HTTPower.get(client, "/users")
+HTTPower.post(client, "/users", body: data)
+```
+
+## Per-request configuration
+
+Pass options directly to any HTTP method to override client and global settings:
+
+```elixir
+HTTPower.get("https://api.example.com/slow-endpoint",
+  timeout: 120,
+  max_retries: 5,
+  rate_limit: [requests: 10, per: :minute, strategy: :error]
+)
+```
+
+When using a configured client, per-request headers are **merged** with client headers rather than replaced:
+
+```elixir
+client = HTTPower.new(
+  base_url: "https://api.example.com",
+  headers: %{"Authorization" => "Bearer token"}
+)
+
+# Sends both Authorization and X-Request-ID headers
+HTTPower.get(client, "/users", headers: %{"X-Request-ID" => "abc123"})
+```
+
+---
+
+## Core options
+
+<ParamField body="max_retries" type="integer" default="3">
+  Maximum number of retries after the initial attempt. Retries are triggered by
+  5xx responses (500, 502, 503, 504) and transport errors. Set to `0` to disable
+  retries entirely.
+
+  ```elixir
+  HTTPower.get(url, max_retries: 5)
+  ```
+</ParamField>
+
+<ParamField body="retry_safe" type="boolean" default="false">
+  When `true`, also retries on connection resets and other normally non-retryable
+  transport errors. Use with care for non-idempotent requests.
+
+  ```elixir
+  HTTPower.get(url, retry_safe: true)
+  ```
+</ParamField>
+
+<ParamField body="base_delay" type="integer" default="1000">
+  Base delay in milliseconds for exponential backoff between retries. Actual delay
+  includes jitter to spread out retry storms. For example, with `base_delay: 1000`,
+  the first retry waits approximately 1 second.
+</ParamField>
+
+<ParamField body="max_delay" type="integer" default="30000">
+  Maximum delay in milliseconds between retries regardless of exponential growth.
+  Caps the backoff to prevent extremely long waits.
+</ParamField>
+
+<ParamField body="timeout" type="integer" default="60">
+  Request timeout in **seconds**. The request is aborted and returns
+  `{:error, %HTTPower.Error{reason: :timeout}}` if this limit is exceeded.
+
+  ```elixir
+  HTTPower.get(url, timeout: 30)  # 30 seconds
+  ```
+</ParamField>
+
+<ParamField body="ssl_verify" type="boolean" default="true">
+  Whether to verify the server's SSL certificate. Disable only in development
+  or when connecting to services with self-signed certificates.
+
+  <Warning>
+    Setting `ssl_verify: false` in production exposes you to man-in-the-middle
+    attacks. Use only in controlled environments.
+  </Warning>
+</ParamField>
+
+<ParamField body="proxy" type="atom | string" default=":system">
+  Proxy configuration. The default `:system` reads from the `HTTP_PROXY` and
+  `HTTPS_PROXY` environment variables. Pass a URL string to specify a proxy
+  explicitly, or `nil` to disable proxy usage.
+
+  ```elixir
+  HTTPower.get(url, proxy: "http://proxy.internal:8080")
+  ```
+</ParamField>
+
+<ParamField body="adapter" type="module | {module, keyword()}" default="auto-detected">
+  The HTTP adapter to use. HTTPower auto-detects adapters in priority order:
+  `HTTPower.Adapter.Finch` → `HTTPower.Adapter.Req` → `HTTPower.Adapter.Tesla`.
+  The first available adapter is used.
+
+  Pass a module atom or a `{module, config}` tuple for adapter-specific options:
+
+  ```elixir
+  # Module only
+  HTTPower.get(url, adapter: HTTPower.Adapter.Req)
+
+  # With adapter-level config
+  HTTPower.get(url, adapter: {HTTPower.Adapter.Finch, pool_size: 10})
+  ```
+
+  <Note>
+    The adapter is cached at compile time when set via global config. To
+    override it at runtime, pass the `adapter` option per-request.
+  </Note>
+</ParamField>
+
+<ParamField body="headers" type="map">
+  Request headers as a map of string keys to string values. When using a
+  configured client, per-request headers are merged with client headers;
+  per-request values win on key conflicts.
+
+  ```elixir
+  HTTPower.get(url, headers: %{
+    "Authorization" => "Bearer token",
+    "Accept" => "application/json"
+  })
+  ```
+</ParamField>
+
+<ParamField body="body" type="string | map">
+  Request body for POST, PUT, PATCH, and DELETE requests.
+
+  ```elixir
+  HTTPower.post(url,
+    body: Jason.encode!(%{name: "Alice"}),
+    headers: %{"Content-Type" => "application/json"}
+  )
+  ```
+</ParamField>
+
+---
+
+## Rate limiting options
+
+Configure via `config :httpower, :rate_limit, [...]`, `HTTPower.new(rate_limit: [...])`, or per-request.
+
+<ParamField body="enabled" type="boolean" default="true">
+  Enable or disable rate limiting. Middleware features default to enabled when
+  the key is present in config. Pass `rate_limit: false` per-request to
+  disable for that request specifically.
+</ParamField>
+
+<ParamField body="requests" type="integer">
+  Maximum number of requests allowed within the time window defined by `per`.
+
+  ```elixir
+  rate_limit: [requests: 100, per: :minute]
+  ```
+</ParamField>
+
+<ParamField body="per" type="atom">
+  Time window unit. One of `:second`, `:minute`, or `:hour`.
+</ParamField>
+
+<ParamField body="strategy" type="atom" default=":wait">
+  What to do when the rate limit is exhausted:
+
+  - `:wait` — Block until a token is available (up to `max_wait_time` ms). Good for background jobs.
+  - `:error` — Return `{:error, %HTTPower.Error{reason: :too_many_requests}}` immediately. Good for user-facing requests.
+</ParamField>
+
+<ParamField body="max_wait_time" type="integer" default="5000">
+  Maximum time in milliseconds to wait for a token when `strategy: :wait`. If
+  the wait exceeds this limit, the request returns an error.
+</ParamField>
+
+<ParamField body="adaptive" type="boolean" default="false">
+  When `true`, the rate limiter reduces throughput automatically when the
+  circuit breaker detects degraded service health. Used by the built-in
+  profiles for coordinated middleware behavior.
+</ParamField>
+
+---
+
+## Circuit breaker options
+
+Configure via `config :httpower, :circuit_breaker, [...]`, `HTTPower.new(circuit_breaker: [...])`, or per-request.
+
+<ParamField body="enabled" type="boolean" default="true">
+  Enable or disable the circuit breaker. Pass `circuit_breaker: false`
+  per-request to bypass it for a specific call.
+</ParamField>
+
+<ParamField body="failure_threshold" type="integer" default="5">
+  Number of failures within the sliding window that triggers the circuit to
+  open. Use with `window_size`.
+
+  ```elixir
+  circuit_breaker: [failure_threshold: 3, window_size: 10]
+  ```
+</ParamField>
+
+<ParamField body="failure_threshold_percentage" type="float">
+  Open the circuit when the failure rate exceeds this percentage (0.0–100.0)
+  within the sliding window. Use instead of or alongside `failure_threshold`.
+
+  ```elixir
+  circuit_breaker: [failure_threshold_percentage: 50.0, window_size: 20]
+  ```
+</ParamField>
+
+<ParamField body="window_size" type="integer" default="10">
+  Number of recent requests tracked in the sliding window used to calculate
+  the failure rate or threshold.
+</ParamField>
+
+<ParamField body="timeout" type="integer" default="60000">
+  Time in milliseconds the circuit stays open before transitioning to
+  half-open to test recovery.
+</ParamField>
+
+<ParamField body="half_open_requests" type="integer" default="1">
+  Number of test requests allowed through when the circuit is half-open.
+  Successful responses close the circuit; failures reopen it.
+</ParamField>
+
+---
+
+## Deduplication options
+
+Configure via `config :httpower, :deduplicate, [...]`, `HTTPower.new(deduplicate: [...])`, or per-request.
+
+<ParamField body="enabled" type="boolean" default="true">
+  Enable or disable request deduplication. Pass `deduplicate: false`
+  per-request to skip deduplication for that call.
+</ParamField>
+
+<ParamField body="ttl" type="integer" default="500">
+  Time in milliseconds to retain in-flight request state for deduplication.
+  Duplicate requests that arrive within this window wait for the original
+  request and share its response.
+
+  ```elixir
+  deduplicate: [enabled: true, ttl: 5_000]  # 5s window for payment APIs
+  ```
+</ParamField>
+
+<ParamField body="key" type="string">
+  Custom deduplication key. By default, HTTPower fingerprints requests using
+  `method + URL + body`. Override this to group requests by a logical key such
+  as a user action ID.
+
+  ```elixir
+  HTTPower.post(url,
+    body: payment_data,
+    deduplicate: [enabled: true, key: "user:#{user_id}:action:#{action_id}"]
+  )
+  ```
+</ParamField>
+
+---
+
+## Logging options
+
+Logging is configured separately from the main `:httpower` config key. You must call `HTTPower.Logger.attach/0` or `HTTPower.Logger.attach/1` in your application startup to enable it.
+
+```elixir config/config.exs
+config :httpower, :logging,
+  level: :info,
+  log_headers: true,
+  log_body: true,
+  sanitize_headers: ["x-custom-token"],
+  sanitize_body_fields: ["secret_key"]
+```
+
+```elixir lib/my_app/application.ex
+def start(_type, _args) do
+  HTTPower.Logger.attach()
+  # ...
+end
+```
+
+<ParamField body="level" type="atom" default=":info">
+  Logger level for HTTP request and response log lines.
+  One of `:debug`, `:info`, `:warning`, or `:error`.
+</ParamField>
+
+<ParamField body="log_headers" type="boolean" default="false">
+  Include request and response headers in log output. Sensitive headers
+  (Authorization, Cookie, API-Key, etc.) are automatically redacted.
+</ParamField>
+
+<ParamField body="log_body" type="boolean" default="false">
+  Include request and response bodies in log output. Sensitive fields
+  (password, api_key, credit_card, cvv, ssn, pin) are automatically redacted.
+</ParamField>
+
+<ParamField body="sanitize_headers" type="string[]">
+  Additional header names to redact from logs, supplementing the built-in
+  list. These are additive — they do not replace default sanitization.
+</ParamField>
+
+<ParamField body="sanitize_body_fields" type="string[]">
+  Additional body field names to redact from logs, supplementing the built-in
+  list. These are additive — they do not replace default sanitization.
+</ParamField>
+
+---
+
+## Middleware pipeline order
+
+HTTPower processes middleware in a fixed order that is designed for correct coordination:
+
+1. **Deduplication** — Cache hits short-circuit the pipeline, bypassing rate limiting (effective 5× capacity boost)
+2. **Rate limiting** — Token bucket check; failures do not count against the circuit breaker
+3. **Circuit breaker** — Final gate before the actual HTTP call
+
+The pipeline is built at compile time. You can add custom middleware steps per-request via the `request_steps` option:
+
+```elixir
+HTTPower.get(url,
+  request_steps: [{MyApp.AuthMiddleware, :auth, [token: "secret"]}]
+)
+```

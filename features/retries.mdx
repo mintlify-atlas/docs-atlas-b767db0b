@@ -1,0 +1,189 @@
+---
+title: Retries
+description: Automatically retry transient failures with exponential backoff, jitter, and Retry-After header support.
+---
+
+HTTPower retries failed requests automatically using exponential backoff with jitter. Retry logic runs as an execution wrapper around the HTTP adapter—meaning each retry is a fresh network attempt, while middleware (circuit breaker, rate limiter, deduplication) each evaluate only once per logical request.
+
+## What gets retried
+
+HTTPower retries two categories of failure:
+
+<Tabs>
+  <Tab title="HTTP status codes">
+    These status codes indicate a transient server-side problem. After retries are exhausted, HTTPower still returns `{:ok, response}` because the server did respond—your application code decides what to do with the status.
+
+    | Status | Meaning |
+    |---|---|
+    | 408 | Request Timeout |
+    | 429 | Too Many Requests |
+    | 500 | Internal Server Error |
+    | 502 | Bad Gateway |
+    | 503 | Service Unavailable |
+    | 504 | Gateway Timeout |
+  </Tab>
+  <Tab title="Transport errors">
+    These errors mean the request never reached the server, or the connection was lost. After retries are exhausted, HTTPower returns `{:error, error}`.
+
+    | Reason | Meaning | Retried by default |
+    |---|---|---|
+    | `:timeout` | Request timed out | Yes |
+    | `:closed` | Connection closed | Yes |
+    | `:econnrefused` | Connection refused | Yes |
+    | `:econnreset` | Connection reset | Only if `retry_safe: true` |
+  </Tab>
+</Tabs>
+
+<Note>
+  Non-retryable errors (4xx other than 408/429, `:not_found`, etc.) are returned immediately without retry.
+</Note>
+
+## Configuration
+
+Set retry options globally, per client, or per request:
+
+```elixir
+# Global defaults via Application config
+config :httpower,
+  max_retries: 3,       # Retry attempts after the initial attempt (default: 3)
+  base_delay: 1_000,    # Base delay in ms (default: 1000)
+  max_delay: 30_000,    # Maximum delay cap in ms (default: 30000)
+  jitter_factor: 0.2,   # Randomization factor 0.0–1.0 (default: 0.2)
+  retry_safe: false     # Retry :econnreset (default: false)
+
+# Or override per request
+HTTPower.get("https://flaky-api.com/data",
+  max_retries: 5,
+  base_delay: 2_000,
+  max_delay: 60_000
+)
+```
+
+### Configuration options
+
+<AccordionGroup>
+  <Accordion title="max_retries">
+    **Type:** `non_neg_integer` — **Default:** `3`
+
+    Number of retry attempts *after* the initial attempt. Set to `0` to disable retries.
+  </Accordion>
+  <Accordion title="base_delay">
+    **Type:** `pos_integer` — **Default:** `1000` (milliseconds)
+
+    Starting delay before the first retry. Doubles with each subsequent attempt before jitter is applied.
+  </Accordion>
+  <Accordion title="max_delay">
+    **Type:** `pos_integer` — **Default:** `30_000` (milliseconds)
+
+    Upper cap on the delay between retries. Once the exponential growth hits this cap, all subsequent delays are bounded at `max_delay * (1 - jitter_factor * random())`.
+  </Accordion>
+  <Accordion title="jitter_factor">
+    **Type:** `float` — **Default:** `0.2`
+
+    Fraction of the computed delay to randomize. A value of `0.2` means the actual delay is between 80% and 100% of the calculated value. Jitter prevents multiple clients from retrying in lockstep (thundering herd).
+  </Accordion>
+  <Accordion title="retry_safe">
+    **Type:** `boolean` — **Default:** `false`
+
+    When `true`, connection reset errors (`:econnreset`) are also retried. This is safe for idempotent operations (GET, PUT) but should be used carefully on POST requests where the server may have partially processed the request before resetting.
+  </Accordion>
+</AccordionGroup>
+
+## Exponential backoff with jitter
+
+HTTPower uses the following formula to calculate the delay before each retry:
+
+```
+delay = min(max_delay, base_delay × 2^(attempt - 1)) × (1 - jitter_factor × random())
+```
+
+With the defaults (`base_delay: 1000`, `jitter_factor: 0.2`):
+
+| Attempt | Delay range |
+|---|---|
+| 1st retry | 800 – 1,000 ms |
+| 2nd retry | 1,600 – 2,000 ms |
+| 3rd retry | 3,200 – 4,000 ms |
+
+You can verify the formula directly:
+
+```elixir
+opts = %{base_delay: 1_000, max_delay: 30_000, jitter_factor: 0.2}
+HTTPower.Retry.calculate_backoff_delay(1, opts)  # 800–1000
+HTTPower.Retry.calculate_backoff_delay(2, opts)  # 1600–2000
+HTTPower.Retry.calculate_backoff_delay(3, opts)  # 3200–4000
+```
+
+## Retry-After header support
+
+For `429 Too Many Requests` and `503 Service Unavailable` responses, HTTPower automatically reads the `Retry-After` header and waits exactly that long instead of using the backoff formula:
+
+```
+# Server responds with:
+HTTP/1.1 429 Too Many Requests
+Retry-After: 5
+
+# HTTPower waits 5 seconds, then retries — ignoring exponential backoff
+```
+
+The header is parsed by `HTTPower.RateLimitHeaders.parse_retry_after/1` and supports both integer seconds and RFC 7231 HTTP-date formats.
+
+## The `retry_safe` option
+
+Connection reset (`:econnreset`) happens when a server abruptly closes the TCP connection—often during load balancer keepalive timeout or server restarts. Because the server may have started processing the request before resetting, HTTPower does not retry these by default:
+
+```elixir
+# Safe to enable for idempotent operations
+HTTPower.get("https://api.example.com/data",
+  retry_safe: true
+)
+
+# Use with care on POST — only safe if your operation is idempotent
+# (e.g., you're sending an idempotency key)
+HTTPower.post("https://api.example.com/charge",
+  headers: %{"Idempotency-Key" => idempotency_key},
+  body: charge_data,
+  retry_safe: true
+)
+```
+
+## Combining with circuit breaker
+
+Retries and circuit breakers serve different purposes and work well together:
+
+```elixir
+HTTPower.get("https://api.example.com/data",
+  # Retry: handles individual transient failures
+  max_retries: 3,
+  base_delay: 1_000,
+
+  # Circuit breaker: handles sustained degradation
+  circuit_breaker: [
+    failure_threshold: 5,
+    timeout: 60_000
+  ]
+)
+```
+
+Retries run *within* the circuit breaker's scope. If retries eventually exhaust and keep failing, those failures accumulate in the circuit breaker's sliding window. Once the failure threshold is reached, the circuit opens and subsequent requests fail immediately—no more retries attempted.
+
+## Telemetry
+
+Every retry attempt emits a `[:httpower, :retry, :attempt]` event:
+
+```elixir
+:telemetry.attach(
+  "my-retry-handler",
+  [:httpower, :retry, :attempt],
+  fn _event, measurements, metadata, _config ->
+    Logger.warning(
+      "Retry attempt #{measurements.attempt_number} " <>
+      "after #{measurements.delay_ms}ms " <>
+      "(reason: #{inspect(metadata.reason)})"
+    )
+  end,
+  nil
+)
+```
+
+See [Telemetry](/features/telemetry) for full event metadata.

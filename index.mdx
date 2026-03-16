@@ -1,97 +1,143 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "HTTPower"
+description: "Production-ready HTTP client for Elixir with built-in circuit breaker, rate limiting, PCI-compliant logging, and smart retries."
 ---
 
-## Setting up
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Get your first request running in under 5 minutes
+  </Card>
+  <Card title="Adapter Support" icon="plug" href="/adapters">
+    Use Finch, Req, or Tesla — your choice
+  </Card>
+  <Card title="Circuit Breaker" icon="shield-halved" href="/features/circuit-breaker">
+    Automatic failure detection and recovery
+  </Card>
+  <Card title="Rate Limiting" icon="gauge-high" href="/features/rate-limiting">
+    Token bucket algorithm with per-endpoint control
+  </Card>
+</CardGroup>
 
-Get your documentation site up and running in minutes.
+## What is HTTPower?
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
+HTTPower is an Elixir HTTP client library that brings production-reliability patterns — circuit breaker, rate limiting, PCI-compliant logging, smart retries, and request deduplication — to your HTTP calls. It works as a thin layer on top of your existing HTTP client (Finch, Req, or Tesla), adding enterprise-grade resilience without changing how you write HTTP code.
+
+```elixir mix.exs
+def deps do
+  [
+    {:httpower, "~> 0.20.0"},
+    {:finch, ">= 0.19.0"}  # or req / tesla
+  ]
+end
+```
+
+```elixir Basic usage
+# Simple one-off request
+{:ok, response} = HTTPower.get("https://api.example.com/users")
+
+# Configured client for reuse
+client = HTTPower.new(
+  base_url: "https://api.example.com",
+  headers: %{"Authorization" => "Bearer #{token}"},
+  max_retries: 3
+)
+
+{:ok, users}   = HTTPower.get(client, "/users")
+{:ok, created} = HTTPower.post(client, "/users", body: data)
+```
+
+## Core features
+
+<CardGroup cols={2}>
+  <Card title="Circuit Breaker" icon="shield-halved" href="/features/circuit-breaker">
+    Three-state circuit breaker (closed / open / half-open) that stops cascading failures automatically
+  </Card>
+  <Card title="Rate Limiting" icon="gauge-high" href="/features/rate-limiting">
+    Token bucket rate limiter with per-request, per-client, and global scopes — plus server header parsing
+  </Card>
+  <Card title="Smart Retries" icon="rotate" href="/features/retries">
+    Exponential backoff with jitter, Retry-After header support, and configurable retry policies
+  </Card>
+  <Card title="Request Deduplication" icon="copy" href="/features/deduplication">
+    In-flight deduplication prevents double charges, race conditions, and duplicate API calls
+  </Card>
+  <Card title="PCI-Compliant Logging" icon="eye-slash" href="/features/pci-logging">
+    Automatic sanitization of credit cards, auth tokens, and PII with structured metadata
+  </Card>
+  <Card title="Telemetry" icon="chart-line" href="/features/telemetry">
+    Comprehensive `:telemetry` events for Prometheus, OpenTelemetry, and LiveDashboard
+  </Card>
+</CardGroup>
+
+## Built for reliability
+
+HTTPower never raises exceptions for HTTP operations. Every call returns `{:ok, response}` or `{:error, reason}`, making error handling explicit and exhaustive.
+
+```elixir Error handling
+case HTTPower.get("https://api.payment.com/charge") do
+  {:ok, %HTTPower.Response{status: 200, body: body}} ->
+    process_payment(body)
+
+  {:ok, %HTTPower.Response{status: 429}} ->
+    # Rate limited by server
+    schedule_retry()
+
+  {:error, %HTTPower.Error{reason: :service_unavailable}} ->
+    # Circuit breaker is open
+    use_fallback()
+
+  {:error, %HTTPower.Error{reason: :timeout}} ->
+    handle_timeout()
+end
+```
+
+## Pre-built profiles
+
+Skip configuration boilerplate with opinionated profiles for common use cases:
+
+```elixir Configuration profiles
+# Payment processing — conservative, deduplication enabled
+client = HTTPower.new(
+  base_url: "https://api.stripe.com",
+  profile: :payment_processing
+)
+
+# High-volume API — maximum throughput
+client = HTTPower.new(
+  base_url: "https://api.github.com",
+  profile: :high_volume_api
+)
+
+# Microservices — cascade failure prevention
+client = HTTPower.new(
+  base_url: "https://internal.service",
+  profile: :microservices_mesh
+)
+```
+
+<Card title="View all profiles" icon="sliders" href="/configuration/profiles">
+  See the full configuration for each profile
 </Card>
 
-## Make it yours
+## Test mode
 
-Design a docs site that looks great and empowers your users.
+HTTPower blocks real HTTP requests during tests by default, and provides adapter-agnostic mock helpers:
 
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
-  </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
-  </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
-  </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
-  </Card>
-</Columns>
+```elixir ExUnit test
+setup do
+  HTTPower.Test.setup()
+end
 
-## Create beautiful pages
+test "charges payment" do
+  HTTPower.Test.stub(fn conn ->
+    HTTPower.Test.json(conn, %{id: "ch_123", status: "succeeded"})
+  end)
 
-Everything you need to create world-class documentation.
+  {:ok, response} = HTTPower.post("https://api.stripe.com/charges", body: charge_data)
+  assert response.body["status"] == "succeeded"
+end
+```
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
-
-## Need inspiration?
-
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
+<Card title="Test mode guide" icon="flask" href="/configuration/test-mode">
+  Learn how to mock HTTP requests in your tests
 </Card>

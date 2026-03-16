@@ -1,80 +1,192 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Get your first HTTPower request running in minutes"
 ---
 
-## Get started in three steps
+<Steps>
 
-Get your documentation site running locally and make your first customization.
+<Step title="Add the dependency">
 
-### Step 1: Set up your local environment
+Add `httpower` and Finch to your dependencies in `mix.exs`:
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+```elixir
+def deps do
+  [
+    {:httpower, "~> 0.20.0"},
+    {:finch, ">= 0.19.0"}
+  ]
+end
+```
 
-### Step 2: Deploy your changes
+Then fetch your dependencies:
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+```bash
+mix deps.get
+```
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+</Step>
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+<Step title="Start Finch in your supervision tree">
 
-### Step 3: Go live
+HTTPower uses Finch for connection pooling. Add `HTTPower.Finch` to your application's supervision tree in `application.ex`:
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+```elixir
+defmodule MyApp.Application do
+  use Application
 
-## Next steps
+  def start(_type, _args) do
+    children = [
+      {Finch, name: HTTPower.Finch},
+      # ... your other children
+    ]
 
-Now that you have your docs running, explore these key features:
+    opts = [strategy: :one_for_one, name: MyApp.Supervisor]
+    Supervisor.start_link(children, opts)
+  end
+end
+```
 
-<CardGroup cols={2}>
+</Step>
 
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
+<Step title="Make your first request">
 
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
+Make a GET request by passing a URL string directly:
 
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
+```elixir
+{:ok, response} = HTTPower.get("https://api.example.com/users")
 
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
+IO.inspect(response.status)  # 200
+IO.inspect(response.body)    # %{"users" => [...]}
+```
 
-</CardGroup>
+`{:ok, response}` means the server responded — including 4xx and 5xx. Check `response.status` to determine the HTTP outcome.
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+</Step>
+
+<Step title="Create a configured client">
+
+For repeated calls to the same API, create a pre-configured client with `HTTPower.new/1`:
+
+```elixir
+client = HTTPower.new(
+  base_url: "https://api.example.com",
+  headers: %{"Authorization" => "Bearer #{token}"},
+  timeout: 30,
+  max_retries: 5
+)
+
+# Reuse the client for multiple requests
+{:ok, users}   = HTTPower.get(client, "/users")
+{:ok, user}    = HTTPower.get(client, "/users/123")
+{:ok, created} = HTTPower.post(client, "/users", body: Jason.encode!(params))
+```
+
+Request-level options are merged with the client's options. Request options take precedence.
+
+</Step>
+
+<Step title="Handle errors properly">
+
+All HTTPower functions return `{:ok, %HTTPower.Response{}}` or `{:error, %HTTPower.Error{}}` — they never raise for HTTP operations. Pattern match on the result to handle each case:
+
+```elixir
+case HTTPower.get("https://api.example.com/users") do
+  {:ok, %HTTPower.Response{status: status, body: body}} when status in 200..299 ->
+    # Successful response
+    process_data(body)
+
+  {:ok, %HTTPower.Response{status: 404}} ->
+    # Server responded, resource not found
+    {:error, :not_found}
+
+  {:ok, %HTTPower.Response{status: status}} when status in 500..599 ->
+    # Server responded with an error (after retries exhausted)
+    {:error, :server_error}
+
+  {:error, %HTTPower.Error{reason: :timeout}} ->
+    # Request timed out
+    {:error, :timeout}
+
+  {:error, %HTTPower.Error{reason: reason}} ->
+    # Other transport error (e.g. :econnrefused)
+    {:error, reason}
+end
+```
+
+</Step>
+
+<Step title="Enable production logging">
+
+Call `HTTPower.Logger.attach/0` in your application startup to enable PCI-compliant structured logging for all HTTP requests:
+
+```elixir
+defmodule MyApp.Application do
+  use Application
+
+  def start(_type, _args) do
+    HTTPower.Logger.attach()
+
+    children = [
+      {Finch, name: HTTPower.Finch},
+      # ...
+    ]
+
+    opts = [strategy: :one_for_one, name: MyApp.Supervisor]
+    Supervisor.start_link(children, opts)
+  end
+end
+```
+
+Sensitive data — authorization headers, credit card numbers, passwords, and other PCI fields — is automatically redacted. Each request is assigned a unique correlation ID:
+
+```
+[HTTPower] [req_a1b2c3d4e5f6g7h8] → GET https://api.example.com/users headers=%{"authorization" => "[REDACTED]"}
+[HTTPower] [req_a1b2c3d4e5f6g7h8] ← 200 (45ms) body=%{"users" => [...]}
+```
+
+All log entries also include structured `Logger.metadata()` (e.g. `httpower_status`, `httpower_duration_ms`, `httpower_correlation_id`) for querying in Datadog, Splunk, or Loki.
+
+</Step>
+
+<Step title="Write tests">
+
+Enable test mode and use `HTTPower.Test` to stub HTTP calls without making real requests:
+
+```elixir
+# test/test_helper.exs
+Application.put_env(:httpower, :test_mode, true)
+ExUnit.start()
+```
+
+```elixir
+defmodule MyApp.ApiClientTest do
+  use ExUnit.Case
+
+  setup do
+    HTTPower.Test.setup()
+  end
+
+  test "fetches users successfully" do
+    HTTPower.Test.stub(fn conn ->
+      HTTPower.Test.json(conn, %{users: [{id: 1, name: "Alice"}]})
+    end)
+
+    {:ok, response} = HTTPower.get("https://api.example.com/users")
+
+    assert response.status == 200
+    assert response.body["users"] != []
+  end
+
+  test "real requests are blocked in test mode" do
+    {:error, error} = HTTPower.get("https://api.example.com/users")
+
+    assert error.reason == :network_blocked
+  end
+end
+```
+
+`HTTPower.Test.setup/0` resets stub state between tests. Stubs work across all adapters.
+
+</Step>
+
+</Steps>

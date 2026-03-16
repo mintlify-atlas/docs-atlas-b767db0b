@@ -1,0 +1,183 @@
+---
+title: Changelog
+description: Release history for HTTPower, including added features, changes, and bug fixes.
+---
+
+<Update label="2026-03-08" description="v0.20.0">
+
+## v0.20.0
+
+### Added
+
+- **Finch adapter unit tests** — Added 27 unit tests for `HTTPower.Adapter.Finch` covering HTTP methods, headers, SSL, proxy, response conversion, error handling, body handling, and `conn_opts` merging. Finch was the only adapter without unit tests.
+
+### Changed
+
+- **Extract shared `prepare_headers/2` into `HTTPower.Adapter`** — Consolidated duplicate header preparation logic from the Finch, Req, and Test modules into a single public function in the `HTTPower.Adapter` behaviour module.
+- **Cache sanitization field lists in Logger at attach time** — Sanitization header and body field lists are now normalized once during `HTTPower.Logger.attach/0` and stored in the handler config, eliminating repeated `Application.get_env` and normalization on every telemetry event.
+- **Logger sanitizes once per event** — Headers and body are now sanitized once and reused for both structured metadata and log message formatting, eliminating redundant work.
+- **Document `HTTPower.new/1` raises on invalid profile** — Clarified that the "never raises" principle applies to HTTP operations, not configuration errors. `new/1` raises `ArgumentError` for unknown profiles, which is correct Elixir convention.
+- **Bump ExDoc to `~> 0.40`** — Enables automatic `llms.txt` generation for LLM-friendly documentation on HexDocs.
+- **Runtime Plug check in `HTTPower.Test`** — Response helpers (`json/2`, `html/2`, `text/2`, `transport_error/2`) now raise a clear error if Plug is not installed, instead of crashing with `UndefinedFunctionError`.
+
+### Fixed
+
+- **Dedup `pid_to_hash` overwrite when a process tracks multiple hashes** — Changed from a single hash per PID to a `MapSet` of hashes. Previously, if a process made concurrent requests with different bodies, only the last hash was tracked, leaking earlier entries on process death.
+- **`max_retries` off-by-one** — `max_retries: 3` now correctly performs 3 retries (4 total attempts). Previously it performed only 2 retries due to a `<` vs `<=` comparison error.
+- **Req adapter leaks HTTPower-specific options to Req** — Expanded the option filter list from 12 to 20 entries, adding `:adapter_config`, `:circuit_breaker`, `:circuit_breaker_key`, `:deduplicate`, `:profile`, `:rate_limit`, `:rate_limit_key`, and `:request_steps`.
+- **DELETE method ignores request body** — `HTTPower.delete/2` now extracts and forwards the `:body` option, matching the behavior of POST, PUT, and PATCH.
+- **Dedup wait telemetry reports actual wait duration** — `wait_time_ms` in `[:httpower, :dedup, :wait]` events now reflects the actual time spent waiting, instead of always reporting 0.
+- **`circuit_breaker_key` works as a top-level request option** — Previously only recognized when nested inside `circuit_breaker: [circuit_breaker_key: "..."]`. Now works as documented: `HTTPower.get(url, circuit_breaker_key: "payment_api")`.
+- **`parse_retry_after/1` normalizes header keys** — Now performs case-insensitive header lookup, so mixed-case keys like `"Retry-After"` are found when calling `parse_retry_after/1` directly.
+
+</Update>
+
+<Update label="2026-03-07" description="v0.19.0">
+
+## v0.19.0
+
+### Added
+
+- **Dedup abort telemetry event** — New `[:httpower, :dedup, :abort]` event emitted when the original requester dies or cancels, notifying waiting processes.
+
+### Changed
+
+- **Short-circuit `can_do_request?` when test mode is false** — Skips mock and plug checks entirely when test mode is disabled, avoiding unnecessary work in production.
+- **Removed redundant `Logger.debug` from rate limiter wait path** — Redundant with the telemetry event already emitted in the same path.
+- **Credit card sanitization now uses Luhn validation** — The regex finds candidates (13–19 digit sequences), then a Luhn checksum filters out non-card numbers like order IDs and timestamps. Reduces false positives by ~90% while maintaining PCI safety. JSON field-name sanitization (e.g., `"credit_card": "value"`) remains unconditional.
+
+### Fixed
+
+- **Dedup waiters hanging when the original requester dies** — Waiters now receive an abort message and can re-issue the request instead of hanging indefinitely.
+- **Logger credit card regex now handles all PAN formats** — The sanitization regex now matches any 13–19 digit sequence regardless of grouping (AmEx non-standard grouping, old 13-digit Visa, extended 19-digit PANs).
+- **Logger JSON field sanitization now redacts non-string values** — Sensitive JSON fields with numeric (`"pin": 1234`), boolean (`"secret": true`), or null values are now properly redacted.
+
+### Removed
+
+- **Removed ~30 redundant tests** — Eliminated exact duplicate transport error tests, redundant "no logs when not attached" logger tests, and adapter integration tests that only exercised `HTTPower.Test` interception rather than actual adapter code.
+
+</Update>
+
+<Update label="2026-03-06" description="v0.18.0">
+
+## v0.18.0
+
+### Added
+
+- **Cross-process mock support in `HTTPower.Test`** — Mocks are now visible to processes spawned from the test (`Task.async`, `Task.async_stream`) via `$callers` chain walking. For pre-existing processes (GenServers, Agents), use the new `HTTPower.Test.allow/2`. Mock storage moved from the process dictionary to ETS for cross-process accessibility.
+
+</Update>
+
+<Update label="2026-03-06" description="v0.17.0">
+
+## v0.17.0
+
+### Added
+
+- **Direct test coverage for `HTTPower.Error`** — Added unit tests for error struct creation and the `error_message/1` helper.
+- **Configurable dedup wait timeout** — The dedup `wait_timeout` option is now user-configurable via the `deduplicate` keyword list (e.g., `deduplicate: [wait_timeout: 30_000]`).
+
+### Changed
+
+- **Elixir 1.20.0-rc.2** — Updated `.tool-versions` to Elixir 1.20.0-rc.2.
+- **Adaptive rate limiting telemetry only emits on state transitions** — The `[:httpower, :rate_limit, :adaptive_reduction]` event now only fires when the adaptive multiplier actually changes, reducing noise under sustained circuit breaker states.
+- **Tesla header conversion aligned with Finch** — Tesla adapter now uses the same prepend+reverse approach as Finch for consistent header ordering.
+
+### Fixed
+
+- **Elixir 1.14 test failures due to missing telemetry dependency** — Added `:telemetry` as a direct dependency. It was used in 6 source files but was only available transitively through optional deps, causing 69 test failures on Elixir 1.14.
+- **Circuit breaker now records 5xx and 429 responses as failures** — Previously, `handle_post_request` treated any `{:ok, response}` as a success, including 5xx and 429 responses returned after retry exhaustion. Sustained server errors now correctly trip the circuit breaker.
+- **Rate limiter `:wait` strategy re-checks tokens after sleeping** — Previously, the `:wait` strategy would sleep and then consume without re-checking availability, which could produce negative token counts under concurrency.
+
+</Update>
+
+<Update label="2026-02-18" description="v0.16.0">
+
+## v0.16.0
+
+### Added
+
+- **PATCH, HEAD, and OPTIONS HTTP methods** — Added `HTTPower.patch/2`, `HTTPower.head/2`, and `HTTPower.options/2` to the public API, with full client instance support.
+- **`HTTPower.Config` module** — Standardized config resolution (request → application env → default) used by CircuitBreaker and RateLimiter.
+
+### Changed
+
+- **Plug is now an optional dependency** — Changed from `only: :test` to `optional: true` so library consumers can use `HTTPower.Test` without independently adding Plug to their deps.
+- **Dedup cleanup interval increased from 1s to 5s** — Reduces GenServer message processing overhead.
+- **Mint.TransportError decoupled from core** — Adapters now unwrap `Mint.TransportError` structs to plain atoms at the adapter boundary. `HTTPower.Error` and `HTTPower.Retry` no longer depend on Mint directly.
+
+### Fixed
+
+- **Race condition in `RateLimiter.consume/2`** — Replaced two separate GenServer calls with a single atomic `{:check_and_consume, ...}` call, preventing over-consumption under concurrency.
+- **Req adapter `connect_options` overwrite** — `maybe_add_ssl_options` and `maybe_add_proxy_options` now merge into existing `:connect_options` instead of overwriting, fixing a bug where configuring both SSL and proxy on an HTTPS request would lose the SSL settings.
+- **Inconsistent response header format across adapters** — Tesla adapter now normalizes response headers to `%{"key" => ["value"]}` (list values), matching Finch and Req.
+- **Hardcoded `connection: close` header removed** — Finch and Req adapters no longer inject `connection: close` on every request, which was defeating HTTP connection pooling.
+- **URL double-slash with trailing base URL slash** — `build_url("https://api.com/", "/users")` now produces `https://api.com/users` instead of `https://api.com//users`.
+
+</Update>
+
+<Update label="2026-02-06" description="v0.15.2">
+
+## v0.15.2
+
+### Added
+
+- **Retry-After HTTP date format support (RFC 7231)** — `parse_retry_after/1` now parses IMF-fixdate values (e.g., `Wed, 21 Oct 2015 07:28:00 GMT`) in addition to integer seconds. Dates in the past are treated as missing.
+
+### Changed
+
+- **CI matrix updated for Elixir 1.19 / OTP 28** — Added Elixir 1.19 and OTP 28 to the test matrix, dropped OTP 25.
+- **Credo strict compliance** — Resolved all 14 strict Credo issues.
+- **Code simplification** — Consolidated duplicate `error_message/1` into `Error.message/1`, removed dead code. Net −159 lines.
+
+</Update>
+
+<Update label="2025-10-19" description="v0.15.1">
+
+## v0.15.1
+
+### Changed
+
+- **Relaxed optional dependency version requirements** — Changed Finch from `~> 0.20` to `>= 0.19.0`, Req from `~> 0.4.0` to `>= 0.4.0`, and Tesla from `~> 1.11` to `>= 1.10.0`. Prevents version conflicts in consuming applications that pin to specific HTTP client versions.
+
+</Update>
+
+<Update label="2025-10-19" description="v0.15.0">
+
+## v0.15.0
+
+### Fixed
+
+- **`HTTPower.Test` mocking now works when HTTPower is installed from Hex** — Fixed `HTTPower.TestInterceptor` to use runtime checks instead of a compile-time `Mix.env()` check. Test interception now works regardless of how HTTPower was compiled. Changed from `if Mix.env() == :test` to `Code.ensure_loaded?(HTTPower.Test) and HTTPower.Test.mock_enabled?()`.
+
+</Update>
+
+<Update label="2025-10-16" description="v0.14.0">
+
+## v0.14.0
+
+### Fixed
+
+- **Conditional compilation for optional adapter dependencies** — Wrapped all adapter modules (Finch, Req, Tesla) with `if Code.ensure_loaded?/1`. Adapters now only compile when their dependencies are available, fixing compilation errors when using HTTPower with only one adapter installed.
+
+</Update>
+
+<Update label="2025-10-13" description="v0.13.0">
+
+## v0.13.0
+
+### Added
+
+- **Intelligent middleware coordination** — Middleware modules now coordinate for dramatically improved system capacity:
+  - **Dedup bypasses rate limiting** — Cache hits skip rate limiting entirely, providing a 5x effective capacity improvement. Middleware order changed to Dedup → RateLimiter → CircuitBreaker.
+  - **Adaptive rate limiting** — Rate limits automatically adjust based on circuit breaker state (100% when closed, 50% when half-open, 10% when open). Prevents thundering herd during service recovery.
+- **Configuration profiles** — Three pre-built option sets for common scenarios:
+  - `:payment_processing` — 100 req/min, 30% failure threshold, 5s dedup window
+  - `:high_volume_api` — 1000 req/min, 50% failure threshold, 1s dedup window
+  - `:microservices_mesh` — 500 req/min, 40% failure threshold, 2s dedup window
+
+### Changed
+
+- **Profile configuration with deep merge** — User options deep-merge with profile defaults for nested keys. Explicit options always win over profile defaults.
+
+</Update>

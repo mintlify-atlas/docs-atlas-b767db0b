@@ -1,0 +1,258 @@
+---
+title: Rate limiting
+description: Enforce per-endpoint request budgets with a token bucket algorithm, configurable wait or error strategies, and automatic server header synchronization.
+---
+
+HTTPower's built-in rate limiter prevents you from overwhelming downstream APIs. It uses a token bucket algorithm backed by ETS for high-performance, in-process enforcement—no external Redis or shared state required.
+
+## Token bucket algorithm
+
+The token bucket works like a refilling reservoir:
+
+1. Each bucket has a maximum capacity equal to your configured `requests` count.
+2. Tokens refill continuously at a rate of `requests / window` (e.g., 100 req/min → 1 token every 600ms).
+3. Each outgoing request consumes one token.
+4. When the bucket is empty, the request is either queued (`:wait` strategy) or rejected (`:error` strategy).
+
+This model allows short bursts up to the bucket capacity while enforcing the average rate over time.
+
+## Configuration
+
+<Tabs>
+  <Tab title="Global config">
+    ```elixir
+    config :httpower, :rate_limit,
+      enabled: true,          # Enable rate limiting (default: false)
+      requests: 100,          # Tokens per window
+      per: :minute,           # Window: :second, :minute, or :hour
+      strategy: :wait,        # :wait or :error
+      max_wait_time: 5_000    # Max wait in ms when strategy is :wait (default: 5000)
+    ```
+  </Tab>
+  <Tab title="Per-client config">
+    ```elixir
+    github = HTTPower.new(
+      base_url: "https://api.github.com",
+      rate_limit: [requests: 60, per: :minute]
+    )
+
+    stripe = HTTPower.new(
+      base_url: "https://api.stripe.com",
+      rate_limit: [requests: 100, per: :second, strategy: :error]
+    )
+    ```
+  </Tab>
+  <Tab title="Per-request config">
+    Override for a specific request:
+
+    ```elixir
+    HTTPower.get("https://api.example.com/search",
+      rate_limit: [
+        requests: 10,
+        per: :minute,
+        strategy: :error
+      ]
+    )
+    ```
+  </Tab>
+</Tabs>
+
+### Configuration options
+
+<AccordionGroup>
+  <Accordion title="enabled">
+    **Type:** `boolean` — **Default:** `false`
+
+    Must be `true` for rate limiting to activate. Disabled rate limiting has zero runtime overhead.
+  </Accordion>
+  <Accordion title="requests">
+    **Type:** `pos_integer` — **Default:** `100`
+
+    Maximum tokens (requests) per time window. This is also the initial bucket capacity.
+  </Accordion>
+  <Accordion title="per">
+    **Type:** `:second | :minute | :hour` — **Default:** `:second`
+
+    The time window over which `requests` tokens are replenished.
+  </Accordion>
+  <Accordion title="strategy">
+    **Type:** `:wait | :error` — **Default:** `:wait`
+
+    What to do when the bucket is empty. See [Strategies](#strategies) below.
+  </Accordion>
+  <Accordion title="max_wait_time">
+    **Type:** `pos_integer` — **Default:** `5000` (milliseconds)
+
+    When `strategy: :wait`, the maximum total time to block waiting for a token. If the wait would exceed this limit, the request returns `{:error, %HTTPower.Error{reason: :rate_limit_wait_timeout}}`.
+  </Accordion>
+</AccordionGroup>
+
+## Strategies
+
+### `:wait` — queue and retry
+
+The default strategy. When tokens are exhausted, HTTPower sleeps until a token refills, then retries the consume. Useful for background jobs where latency is acceptable.
+
+```elixir
+config :httpower, :rate_limit,
+  strategy: :wait,
+  max_wait_time: 5_000  # Give up after 5 seconds total
+```
+
+If the cumulative wait exceeds `max_wait_time`, the request returns an error rather than waiting indefinitely.
+
+### `:error` — fail immediately
+
+Returns an error as soon as the bucket is empty. Use this for user-facing requests where queueing would degrade the user experience.
+
+```elixir
+case HTTPower.get(url, rate_limit: [strategy: :error]) do
+  {:ok, response} ->
+    handle_response(response)
+
+  {:error, %HTTPower.Error{reason: :too_many_requests}} ->
+    # Return 429 to your own caller, show a message, or shed load
+    handle_rate_limit()
+end
+```
+
+## Custom bucket keys
+
+By default, HTTPower uses the request hostname as the bucket key. Use `rate_limit_key` to share a budget across multiple endpoints or to isolate endpoints that would otherwise share a host:
+
+```elixir
+# Both endpoints draw from the same "example_api" bucket
+HTTPower.get("https://api.example.com/users",
+  rate_limit_key: "example_api",
+  rate_limit: [requests: 100, per: :minute]
+)
+
+HTTPower.get("https://api.example.com/orders",
+  rate_limit_key: "example_api",
+  rate_limit: [requests: 100, per: :minute]
+)
+```
+
+## Server rate limit header parsing
+
+Many APIs communicate their actual rate limit state in response headers. HTTPower can parse these headers and synchronize your local bucket, so your client stays in sync with the server's true state rather than estimating based on local counts.
+
+```elixir
+# Parse headers from any HTTP response
+{:ok, response} = HTTPower.get(github_client, "/users")
+
+case HTTPower.RateLimitHeaders.parse(response.headers) do
+  {:ok, info} ->
+    # %{limit: 60, remaining: 42, reset_at: ~U[...], format: :github}
+    HTTPower.Middleware.RateLimiter.update_from_headers("api.github.com", info)
+
+  {:error, :not_found} ->
+    :ok  # No rate limit headers present
+end
+```
+
+`parse/1` auto-detects the header format. You can also specify it explicitly:
+
+```elixir
+HTTPower.RateLimitHeaders.parse(headers, format: :github)
+HTTPower.RateLimitHeaders.parse(headers, format: :rfc)
+HTTPower.RateLimitHeaders.parse(headers, format: :stripe)
+```
+
+### Supported header formats
+
+<AccordionGroup>
+  <Accordion title="GitHub / Twitter style (X-RateLimit-*)">
+    ```
+    X-RateLimit-Limit: 60
+    X-RateLimit-Remaining: 42
+    X-RateLimit-Reset: 1234567890
+    ```
+
+    `reset` is a Unix timestamp. Parsed as `format: :github`.
+  </Accordion>
+  <Accordion title="RFC 6585 / IETF style (RateLimit-*)">
+    ```
+    RateLimit-Limit: 100
+    RateLimit-Remaining: 73
+    RateLimit-Reset: 1234567890
+    ```
+
+    Parsed as `format: :rfc`.
+  </Accordion>
+  <Accordion title="Stripe style (X-Stripe-RateLimit-*)">
+    ```
+    X-Stripe-RateLimit-Limit: 100
+    X-Stripe-RateLimit-Remaining: 85
+    X-Stripe-RateLimit-Reset: 1234567890
+    ```
+
+    Parsed as `format: :stripe`.
+  </Accordion>
+  <Accordion title="Retry-After header">
+    Used by 429 and 503 responses. Accepts either an integer (seconds) or an RFC 7231 HTTP date:
+
+    ```
+    Retry-After: 120
+    Retry-After: Wed, 21 Oct 2015 07:28:00 GMT
+    ```
+
+    ```elixir
+    HTTPower.RateLimitHeaders.parse_retry_after(%{"retry-after" => "120"})
+    # {:ok, 120}
+    ```
+
+    HTTPower's retry logic respects this header automatically for 429 and 503 responses—no extra configuration needed.
+  </Accordion>
+</AccordionGroup>
+
+## Real-world examples
+
+### GitHub API (60 req/min unauthenticated)
+
+```elixir
+github = HTTPower.new(
+  base_url: "https://api.github.com",
+  headers: %{"Accept" => "application/vnd.github.v3+json"},
+  rate_limit: [requests: 60, per: :minute]
+)
+
+{:ok, response} = HTTPower.get(github, "/repos/elixir-lang/elixir")
+
+# Optionally sync bucket from response headers
+case HTTPower.RateLimitHeaders.parse(response.headers) do
+  {:ok, info} -> HTTPower.Middleware.RateLimiter.update_from_headers("api.github.com", info)
+  _ -> :ok
+end
+```
+
+### Stripe API (100 req/sec)
+
+```elixir
+stripe = HTTPower.new(
+  base_url: "https://api.stripe.com",
+  headers: %{"Authorization" => "Bearer #{stripe_key}"},
+  rate_limit: [
+    requests: 100,
+    per: :second,
+    strategy: :error  # Stripe's own queuing is better than ours here
+  ]
+)
+
+case HTTPower.post(stripe, "/charges", body: charge_body) do
+  {:ok, response} -> process_charge(response)
+  {:error, %HTTPower.Error{reason: :too_many_requests}} -> retry_later()
+end
+```
+
+## Telemetry
+
+The rate limiter emits three events:
+
+| Event | When fired |
+|---|---|
+| `[:httpower, :rate_limit, :ok]` | Request passed, includes `tokens_remaining` |
+| `[:httpower, :rate_limit, :wait]` | Waiting for token, includes `wait_time_ms` |
+| `[:httpower, :rate_limit, :exceeded]` | Bucket empty with `:error` strategy |
+
+See [Telemetry](/features/telemetry) for full event metadata and integration examples.

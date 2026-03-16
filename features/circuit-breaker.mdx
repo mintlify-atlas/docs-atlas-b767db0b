@@ -1,0 +1,224 @@
+---
+title: Circuit breaker
+description: Protect your application from cascading failures with automatic failure detection, state-based request gating, and manual override controls.
+---
+
+The circuit breaker pattern prevents your application from repeatedly calling a failing service. Instead of waiting for each request to time out, HTTPower detects degraded services and fails fast—giving the downstream service time to recover while keeping your application responsive.
+
+## How circuit breakers work
+
+A circuit breaker wraps each outgoing service call and tracks whether requests are succeeding or failing. It operates as a state machine with three states:
+
+<Steps>
+  <Step title="Closed — normal operation">
+    Requests pass through normally. HTTPower tracks successes and failures in a sliding window. When the failure count (or failure rate) exceeds the configured threshold, the circuit transitions to **Open**.
+  </Step>
+  <Step title="Open — failing fast">
+    All requests fail immediately with `{:error, %HTTPower.Error{reason: :service_unavailable}}`. No network call is made. After a configurable `timeout` period, the circuit transitions to **Half-Open** to test whether the service has recovered.
+  </Step>
+  <Step title="Half-Open — testing recovery">
+    A limited number of probe requests are allowed through. If they succeed, the circuit transitions back to **Closed**. If any probe fails, the circuit immediately returns to **Open** and the timer resets.
+  </Step>
+</Steps>
+
+```
+Closed ──(threshold exceeded)──▶ Open ──(timeout)──▶ Half-Open
+  ▲                                                       │
+  └───────────────(probe succeeds)───────────────────────┘
+                                    ▲
+                  Open ◀──(probe fails)──┘
+```
+
+## Configuration
+
+<Tabs>
+  <Tab title="Global config">
+    Set defaults in `config/config.exs` that apply to every request:
+
+    ```elixir
+    config :httpower, :circuit_breaker,
+      enabled: true,
+      failure_threshold: 5,             # Open after 5 failures
+      failure_threshold_percentage: 50, # Or open at 50% failure rate
+      window_size: 10,                  # Track last 10 requests
+      timeout: 60_000,                  # Stay open for 60 seconds
+      half_open_requests: 1             # Allow 1 probe request
+    ```
+  </Tab>
+  <Tab title="Per-client config">
+    Override at the client level for a specific service:
+
+    ```elixir
+    client = HTTPower.new(
+      base_url: "https://api.payment-gateway.com",
+      circuit_breaker: [
+        failure_threshold: 3,
+        timeout: 30_000,
+        half_open_requests: 2
+      ]
+    )
+    ```
+  </Tab>
+  <Tab title="Per-request key">
+    Group multiple endpoints under one shared circuit using `circuit_breaker_key`:
+
+    ```elixir
+    HTTPower.get("https://api.example.com/endpoint1",
+      circuit_breaker_key: "example_api"
+    )
+
+    HTTPower.get("https://api.example.com/endpoint2",
+      circuit_breaker_key: "example_api"  # Shares the same circuit
+    )
+    ```
+
+    Without a custom key, HTTPower uses the request hostname as the circuit key.
+  </Tab>
+</Tabs>
+
+### Configuration options
+
+<AccordionGroup>
+  <Accordion title="enabled">
+    **Type:** `boolean` — **Default:** `false`
+
+    Enables or disables the circuit breaker. Must be `true` for any circuit breaker behavior to activate.
+  </Accordion>
+  <Accordion title="failure_threshold">
+    **Type:** `pos_integer` — **Default:** `5`
+
+    Number of failures in the sliding window required to open the circuit. Evaluated on every failed request.
+  </Accordion>
+  <Accordion title="failure_threshold_percentage">
+    **Type:** `pos_integer | nil` — **Default:** `nil`
+
+    Alternative threshold expressed as a percentage of failures in the window (e.g., `50` = 50%). Requires `window_size` requests to have been observed before the percentage check activates. Either threshold can trigger an open—whichever is exceeded first.
+  </Accordion>
+  <Accordion title="window_size">
+    **Type:** `pos_integer` — **Default:** `10`
+
+    Number of most-recent requests tracked in the sliding window. Older results are discarded.
+  </Accordion>
+  <Accordion title="timeout">
+    **Type:** `pos_integer` — **Default:** `60_000` (milliseconds)
+
+    How long the circuit stays open before transitioning to Half-Open to test recovery.
+  </Accordion>
+  <Accordion title="half_open_requests">
+    **Type:** `pos_integer` — **Default:** `1`
+
+    Number of probe requests allowed through while in the Half-Open state. All probes must succeed before the circuit closes.
+  </Accordion>
+</AccordionGroup>
+
+## Manual control API
+
+You can inspect and override circuit state programmatically—useful for deployments, canary releases, or testing:
+
+```elixir
+alias HTTPower.Middleware.CircuitBreaker
+
+# Check current state — returns :closed | :open | :half_open | nil
+CircuitBreaker.get_state("payment_api")
+
+# Manually open a circuit (e.g., before a known-bad deploy)
+CircuitBreaker.open_circuit("payment_api")
+
+# Manually close a circuit (e.g., after confirming service is healthy)
+CircuitBreaker.close_circuit("payment_api")
+
+# Reset completely — removes all history and returns to initial closed state
+CircuitBreaker.reset_circuit("payment_api")
+```
+
+<Note>
+  `close_circuit/1` sets the state to `:closed` but preserves no request history. `reset_circuit/1` deletes the circuit entry entirely—the next request starts fresh with an empty window.
+</Note>
+
+## Real-world examples
+
+### Payment gateway protection
+
+Payment gateways are a critical dependency where failures must fail fast to avoid poor user experience:
+
+```elixir
+payment = HTTPower.new(
+  base_url: "https://api.stripe.com",
+  circuit_breaker: [
+    failure_threshold: 3,      # Open quickly on payment failures
+    timeout: 30_000,           # Retry after 30 seconds
+    half_open_requests: 2      # Test with 2 probe requests before closing
+  ]
+)
+
+case HTTPower.post(payment, "/charges", body: charge_data) do
+  {:ok, response} ->
+    handle_successful_payment(response)
+
+  {:error, %HTTPower.Error{reason: :service_unavailable}} ->
+    # Circuit is open — fail fast and route to fallback
+    use_fallback_payment_provider()
+
+  {:error, error} ->
+    handle_payment_error(error)
+end
+```
+
+### Cascading failure prevention
+
+Without a circuit breaker, a slow or unresponsive dependency causes threads to pile up. HTTPower stops the cascade by failing immediately once the threshold is reached:
+
+```elixir
+# Five consecutive failures trip the circuit
+for _ <- 1..5 do
+  {:error, _} = HTTPower.get("https://failing-api.com/endpoint")
+end
+
+# Subsequent requests fail immediately — no network call made
+{:error, %HTTPower.Error{reason: :service_unavailable}} =
+  HTTPower.get("https://failing-api.com/endpoint")
+
+# After the timeout, the circuit enters half-open
+:timer.sleep(60_000)
+
+# A successful probe request closes the circuit
+{:ok, _response} = HTTPower.get("https://failing-api.com/endpoint")
+```
+
+## Combining with retries
+
+Retries and circuit breakers solve complementary problems:
+
+- **Retries** handle *transient* failures — a single timeout, a momentary blip.
+- **Circuit breakers** handle *persistent* failures — a service that is down or degrading.
+
+Use them together:
+
+```elixir
+HTTPower.get("https://api.example.com/users",
+  # Retry transient failures up to 3 times
+  max_retries: 3,
+  base_delay: 1000,
+
+  # Open the circuit after 5 persistent failures
+  circuit_breaker: [
+    failure_threshold: 5,
+    timeout: 60_000
+  ]
+)
+```
+
+<Info>
+  Retries run *inside* the circuit breaker boundary. Each retry attempt counts as a separate request for circuit breaker tracking. If retries exhaust and the failure threshold is reached, the circuit opens and subsequent requests fail without any retry attempts.
+</Info>
+
+## Telemetry
+
+The circuit breaker emits two telemetry events you can attach to:
+
+| Event | When fired |
+|---|---|
+| `[:httpower, :circuit_breaker, :state_change]` | Any state transition (closed → open, open → half-open, half-open → closed) |
+| `[:httpower, :circuit_breaker, :open]` | A request is blocked because the circuit is open |
+
+See [Telemetry](/features/telemetry) for full event metadata and integration examples.

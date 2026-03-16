@@ -1,0 +1,582 @@
+---
+title: Telemetry
+description: Comprehensive telemetry events for HTTP requests, retries, rate limiting, circuit breakers, and deduplication — ready for Prometheus, OpenTelemetry, and Phoenix LiveDashboard.
+---
+
+HTTPower emits telemetry events via Elixir's built-in `:telemetry` library for every significant operation. Attach your own handlers to build metrics, traces, custom log lines, or alerts without modifying HTTPower's internals.
+
+## Quick start
+
+```elixir
+:telemetry.attach_many(
+  "httpower-handler",
+  [
+    [:httpower, :request, :start],
+    [:httpower, :request, :stop],
+    [:httpower, :retry, :attempt]
+  ],
+  fn event, measurements, metadata, _config ->
+    IO.inspect({event, measurements, metadata})
+  end,
+  nil
+)
+```
+
+## Event reference
+
+### HTTP request lifecycle
+
+HTTPower uses `:telemetry.span/3` to emit start, stop, and exception events for every request.
+
+<AccordionGroup>
+  <Accordion title="[:httpower, :request, :start]">
+    Emitted when a request begins.
+
+    **Measurements:**
+
+    | Key | Type | Description |
+    |---|---|---|
+    | `system_time` | `integer` | System time at request start (native units) |
+
+    **Metadata:**
+
+    | Key | Type | Description |
+    |---|---|---|
+    | `method` | `atom` | HTTP method (`:get`, `:post`, `:put`, `:delete`) |
+    | `url` | `string` | Sanitized URL — query params and fragments stripped |
+
+    ```elixir
+    # Example
+    event: [:httpower, :request, :start]
+    measurements: %{system_time: 1640995200000000000}
+    metadata: %{method: :get, url: "https://api.example.com/users"}
+    ```
+  </Accordion>
+
+  <Accordion title="[:httpower, :request, :stop]">
+    Emitted when a request completes (success or error).
+
+    **Measurements:**
+
+    | Key | Type | Description |
+    |---|---|---|
+    | `duration` | `integer` | Duration in native time units — convert with `System.convert_time_unit/3` |
+    | `monotonic_time` | `integer` | Monotonic time at completion |
+
+    **Metadata:**
+
+    | Key | Type | Description |
+    |---|---|---|
+    | `method` | `atom` | HTTP method |
+    | `url` | `string` | Sanitized URL |
+    | `status` | `integer` | HTTP status code (successful responses) |
+    | `error_type` | `atom` | Error reason atom (failed requests) |
+    | `retry_count` | `integer` | Number of retries performed (default: 0) |
+
+    ```elixir
+    # Success
+    event: [:httpower, :request, :stop]
+    measurements: %{duration: 45_000_000, monotonic_time: -576460751234567890}
+    metadata: %{method: :get, url: "https://api.example.com/users", status: 200, retry_count: 0}
+
+    # Error
+    event: [:httpower, :request, :stop]
+    measurements: %{duration: 5_000_000, monotonic_time: -576460751234567890}
+    metadata: %{method: :post, url: "https://api.example.com/orders", error_type: :timeout, retry_count: 3}
+    ```
+  </Accordion>
+
+  <Accordion title="[:httpower, :request, :exception]">
+    Emitted when an unhandled exception occurs during request processing. HTTPower converts most errors to result tuples, so this event is rare.
+
+    **Measurements:**
+
+    | Key | Type | Description |
+    |---|---|---|
+    | `duration` | `integer` | Duration in native time units |
+
+    **Metadata:**
+
+    | Key | Type | Description |
+    |---|---|---|
+    | `method` | `atom` | HTTP method |
+    | `url` | `string` | Sanitized URL |
+    | `kind` | `atom` | Exception kind: `:throw`, `:error`, or `:exit` |
+    | `reason` | `term` | Exception reason |
+    | `stacktrace` | `list` | Exception stacktrace |
+  </Accordion>
+</AccordionGroup>
+
+### Retry events
+
+<AccordionGroup>
+  <Accordion title="[:httpower, :retry, :attempt]">
+    Emitted before each retry attempt.
+
+    **Measurements:**
+
+    | Key | Type | Description |
+    |---|---|---|
+    | `attempt_number` | `integer` | Current attempt number (2 for first retry, 3 for second) |
+    | `delay_ms` | `integer` | Delay before this retry in milliseconds |
+
+    **Metadata:**
+
+    | Key | Type | Description |
+    |---|---|---|
+    | `method` | `atom` | HTTP method |
+    | `url` | `URI.t()` | Request URL |
+    | `reason` | `term` | Reason for retry (`:timeout`, `{:http_status, 500}`, etc.) |
+
+    ```elixir
+    event: [:httpower, :retry, :attempt]
+    measurements: %{attempt_number: 2, delay_ms: 1000}
+    metadata: %{method: :get, url: "https://api.example.com/users", reason: {:http_status, 503}}
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Rate limiter events
+
+<AccordionGroup>
+  <Accordion title="[:httpower, :rate_limit, :ok]">
+    Emitted when a request passes the rate limit check.
+
+    **Measurements:**
+
+    | Key | Type | Description |
+    |---|---|---|
+    | `tokens_remaining` | `float` | Tokens left in bucket after consuming one |
+    | `wait_time_ms` | `integer` | Always `0` for this event |
+
+    **Metadata:**
+
+    | Key | Type | Description |
+    |---|---|---|
+    | `bucket_key` | `string` | Rate limit bucket identifier (hostname or custom key) |
+
+    ```elixir
+    event: [:httpower, :rate_limit, :ok]
+    measurements: %{tokens_remaining: 45.5, wait_time_ms: 0}
+    metadata: %{bucket_key: "api.example.com"}
+    ```
+  </Accordion>
+
+  <Accordion title="[:httpower, :rate_limit, :wait]">
+    Emitted when the rate limit is exceeded and the `:wait` strategy is in use.
+
+    **Measurements:**
+
+    | Key | Type | Description |
+    |---|---|---|
+    | `wait_time_ms` | `integer` | Time spent waiting for a token |
+
+    **Metadata:**
+
+    | Key | Type | Description |
+    |---|---|---|
+    | `bucket_key` | `string` | Rate limit bucket identifier |
+    | `strategy` | `:wait` | Rate limit strategy |
+
+    ```elixir
+    event: [:httpower, :rate_limit, :wait]
+    measurements: %{wait_time_ms: 250}
+    metadata: %{bucket_key: "api.example.com", strategy: :wait}
+    ```
+  </Accordion>
+
+  <Accordion title="[:httpower, :rate_limit, :exceeded]">
+    Emitted when the rate limit is exceeded and the `:error` strategy is in use.
+
+    **Measurements:**
+
+    | Key | Type | Description |
+    |---|---|---|
+    | `tokens_remaining` | `integer` | Always `0` |
+
+    **Metadata:**
+
+    | Key | Type | Description |
+    |---|---|---|
+    | `bucket_key` | `string` | Rate limit bucket identifier |
+    | `strategy` | `:error` | Rate limit strategy |
+
+    ```elixir
+    event: [:httpower, :rate_limit, :exceeded]
+    measurements: %{tokens_remaining: 0}
+    metadata: %{bucket_key: "api.example.com", strategy: :error}
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Circuit breaker events
+
+<AccordionGroup>
+  <Accordion title="[:httpower, :circuit_breaker, :state_change]">
+    Emitted on any state transition: closed → open, open → half-open, half-open → closed.
+
+    **Measurements:**
+
+    | Key | Type | Description |
+    |---|---|---|
+    | `timestamp` | `integer` | System time of the transition |
+
+    **Metadata:**
+
+    | Key | Type | Description |
+    |---|---|---|
+    | `circuit_key` | `string` | Circuit identifier (hostname or custom key) |
+    | `from_state` | `atom` | Previous state: `:closed`, `:open`, or `:half_open` |
+    | `to_state` | `atom` | New state |
+    | `failure_count` | `integer` | Failures in the current window |
+    | `failure_rate` | `float` | Failure rate as a decimal (e.g., `0.83` = 83%) |
+
+    ```elixir
+    event: [:httpower, :circuit_breaker, :state_change]
+    measurements: %{timestamp: 1640995200000000000}
+    metadata: %{
+      circuit_key: "payment.api.example.com",
+      from_state: :closed,
+      to_state: :open,
+      failure_count: 5,
+      failure_rate: 0.83
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="[:httpower, :circuit_breaker, :open]">
+    Emitted when a request is blocked because the circuit is open.
+
+    **Measurements:** `%{}` (empty)
+
+    **Metadata:**
+
+    | Key | Type | Description |
+    |---|---|---|
+    | `circuit_key` | `string` | Circuit identifier |
+
+    ```elixir
+    event: [:httpower, :circuit_breaker, :open]
+    measurements: %{}
+    metadata: %{circuit_key: "payment.api.example.com"}
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Deduplication events
+
+<AccordionGroup>
+  <Accordion title="[:httpower, :dedup, :execute]">
+    Emitted when a request is the first occurrence and will be executed.
+
+    **Measurements:** `%{}` (empty)
+
+    **Metadata:**
+
+    | Key | Type | Description |
+    |---|---|---|
+    | `dedup_key` | `string` | SHA-256 hash identifying the request |
+
+    ```elixir
+    event: [:httpower, :dedup, :execute]
+    measurements: %{}
+    metadata: %{dedup_key: "2cdff299ad44f172e45a54feaafdac27f230a63471469182a64049689e6bf24b"}
+    ```
+  </Accordion>
+
+  <Accordion title="[:httpower, :dedup, :wait]">
+    Emitted when a duplicate request waits for an in-flight request to complete.
+
+    **Measurements:**
+
+    | Key | Type | Description |
+    |---|---|---|
+    | `wait_time_ms` | `integer` | Time spent waiting in milliseconds |
+
+    **Metadata:**
+
+    | Key | Type | Description |
+    |---|---|---|
+    | `dedup_key` | `string` | Deduplication hash |
+
+    ```elixir
+    event: [:httpower, :dedup, :wait]
+    measurements: %{wait_time_ms: 450}
+    metadata: %{dedup_key: "2cdff299ad44f172e45a54feaafdac27f230a63471469182a64049689e6bf24b"}
+    ```
+  </Accordion>
+
+  <Accordion title="[:httpower, :dedup, :cache_hit]">
+    Emitted when a request returns a cached response from the just-completed entry (within the 500ms TTL).
+
+    **Measurements:** `%{}` (empty)
+
+    **Metadata:**
+
+    | Key | Type | Description |
+    |---|---|---|
+    | `dedup_key` | `string` | Deduplication hash |
+
+    ```elixir
+    event: [:httpower, :dedup, :cache_hit]
+    measurements: %{}
+    metadata: %{dedup_key: "2cdff299ad44f172e45a54feaafdac27f230a63471469182a64049689e6bf24b"}
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Integration examples
+
+### Prometheus
+
+Use `telemetry_metrics` and `telemetry_metrics_prometheus` to export HTTPower metrics:
+
+```elixir
+# mix.exs
+defp deps do
+  [
+    {:telemetry_metrics, "~> 1.0"},
+    {:telemetry_metrics_prometheus, "~> 1.1"}
+  ]
+end
+```
+
+```elixir
+# lib/my_app/telemetry.ex
+defmodule MyApp.Telemetry do
+  use Supervisor
+  import Telemetry.Metrics
+
+  def start_link(arg) do
+    Supervisor.start_link(__MODULE__, arg, name: __MODULE__)
+  end
+
+  def init(_arg) do
+    children = [
+      {TelemetryMetricsPrometheus, [metrics: metrics()]}
+    ]
+    Supervisor.init(children, strategy: :one_for_one)
+  end
+
+  defp metrics do
+    [
+      distribution(
+        "httpower.request.duration",
+        event_name: [:httpower, :request, :stop],
+        measurement: :duration,
+        unit: {:native, :millisecond},
+        tags: [:method, :status],
+        tag_values: fn metadata ->
+          %{
+            method: metadata.method,
+            status: Map.get(metadata, :status, "error")
+          }
+        end
+      ),
+
+      counter(
+        "httpower.request.count",
+        event_name: [:httpower, :request, :stop],
+        tags: [:method, :status]
+      ),
+
+      counter(
+        "httpower.retry.attempts",
+        event_name: [:httpower, :retry, :attempt],
+        tags: [:method, :reason],
+        tag_values: fn metadata ->
+          %{
+            method: metadata.method,
+            reason: format_reason(metadata.reason)
+          }
+        end
+      ),
+
+      counter(
+        "httpower.circuit_breaker.state_changes",
+        event_name: [:httpower, :circuit_breaker, :state_change],
+        tags: [:from_state, :to_state]
+      ),
+
+      counter(
+        "httpower.rate_limit.exceeded",
+        event_name: [:httpower, :rate_limit, :exceeded],
+        tags: [:bucket_key]
+      )
+    ]
+  end
+
+  defp format_reason({:http_status, status}), do: "http_#{status}"
+  defp format_reason(reason) when is_atom(reason), do: to_string(reason)
+  defp format_reason(_), do: "unknown"
+end
+```
+
+### OpenTelemetry
+
+```elixir
+# mix.exs
+defp deps do
+  [
+    {:opentelemetry, "~> 1.0"},
+    {:opentelemetry_telemetry, "~> 1.0"}
+  ]
+end
+```
+
+```elixir
+# lib/my_app/application.ex
+defmodule MyApp.Application do
+  use Application
+
+  def start(_type, _args) do
+    OpentelemetryTelemetry.register_application_tracer(:httpower)
+
+    children = []
+    Supervisor.start_link(children, strategy: :one_for_one, name: MyApp.Supervisor)
+  end
+end
+```
+
+HTTPower's telemetry events map automatically to OpenTelemetry spans:
+- HTTP requests become spans with `method`, `url`, and `status` attributes.
+- Retry attempts add span events.
+- Circuit breaker state changes add span events.
+- Rate limiting adds span attributes.
+
+### Custom logging handler
+
+```elixir
+defmodule MyApp.HTTPowerLogger do
+  require Logger
+
+  def setup do
+    :telemetry.attach_many(
+      "httpower-custom-logger",
+      [[:httpower, :request, :stop]],
+      &handle_event/4,
+      nil
+    )
+  end
+
+  def handle_event([:httpower, :request, :stop], measurements, metadata, _config) do
+    duration_ms = System.convert_time_unit(measurements.duration, :native, :millisecond)
+    status = Map.get(metadata, :status, "error")
+    method = metadata.method |> to_string() |> String.upcase()
+
+    Logger.info("HTTP #{method} #{metadata.url} - #{status} (#{duration_ms}ms)")
+  rescue
+    exception ->
+      Logger.error("Telemetry handler error: #{inspect(exception)}")
+  end
+end
+
+# In application.ex
+MyApp.HTTPowerLogger.setup()
+```
+
+### Phoenix LiveDashboard
+
+Add HTTPower metrics to your LiveDashboard instance:
+
+```elixir
+# lib/my_app_web/telemetry.ex
+defmodule MyAppWeb.Telemetry do
+  use Supervisor
+  import Telemetry.Metrics
+
+  def start_link(arg) do
+    Supervisor.start_link(__MODULE__, arg, name: __MODULE__)
+  end
+
+  def init(_arg) do
+    children = [
+      {:telemetry_poller, measurements: [], period: 10_000}
+    ]
+    Supervisor.init(children, strategy: :one_for_one)
+  end
+
+  def metrics do
+    [
+      summary("httpower.request.duration",
+        event_name: [:httpower, :request, :stop],
+        measurement: :duration,
+        unit: {:native, :millisecond},
+        tags: [:method]
+      ),
+      counter("httpower.request.count",
+        event_name: [:httpower, :request, :stop],
+        tags: [:method, :status]
+      ),
+      counter("httpower.retry.attempts",
+        event_name: [:httpower, :retry, :attempt],
+        tags: [:method]
+      ),
+      counter("httpower.circuit_breaker.state_changes",
+        event_name: [:httpower, :circuit_breaker, :state_change],
+        tags: [:to_state]
+      ),
+      counter("httpower.rate_limit.exceeded",
+        event_name: [:httpower, :rate_limit, :exceeded],
+        tags: [:bucket_key]
+      )
+    ]
+  end
+end
+```
+
+```elixir
+# lib/my_app_web/router.ex
+live_dashboard "/dashboard",
+  metrics: MyAppWeb.Telemetry
+```
+
+## Best practices
+
+<AccordionGroup>
+  <Accordion title="Convert duration to milliseconds">
+    Duration measurements are in native time units. Always convert before displaying or storing:
+
+    ```elixir
+    duration_ms = System.convert_time_unit(measurements.duration, :native, :millisecond)
+    ```
+  </Accordion>
+
+  <Accordion title="Avoid high-cardinality tags">
+    Do not tag metrics with `url`—it can have thousands of unique values. Use `method` and `status` instead:
+
+    ```elixir
+    # Good
+    tags: [:method, :status]
+
+    # Bad — breaks Prometheus and your wallet
+    tags: [:url]
+    ```
+  </Accordion>
+
+  <Accordion title="Handle errors in telemetry handlers">
+    A crashing telemetry handler is detached automatically by the `:telemetry` library. Rescue exceptions to keep your handler attached:
+
+    ```elixir
+    def handle_event(event, measurements, metadata, _config) do
+      # your logic
+    rescue
+      exception ->
+        Logger.error("Telemetry handler crashed: #{inspect(exception)}")
+    end
+    ```
+  </Accordion>
+
+  <Accordion title="Detach handlers in tests">
+    ```elixir
+    setup do
+      handler_id = make_ref()
+
+      :telemetry.attach_many(handler_id, events, &handle_event/4, nil)
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      :ok
+    end
+    ```
+  </Accordion>
+</AccordionGroup>

@@ -1,0 +1,295 @@
+---
+title: Configuration profiles
+description: Pre-built configuration profiles that encode best practices for payment processing, high-volume APIs, and microservices.
+---
+
+Profiles are pre-built keyword lists that encode proven middleware configurations for common production scenarios. Instead of tuning rate limiting, circuit breaker, and retry settings from scratch, you pick a profile and get coordinated defaults that work well together out of the box.
+
+## Using a profile
+
+Pass the `profile` option to `HTTPower.new/1`:
+
+```elixir
+client = HTTPower.new(
+  base_url: "https://payment-gateway.com",
+  profile: :payment_processing
+)
+```
+
+`HTTPower.new/1` raises `ArgumentError` at client construction time if you pass an unknown profile name.
+
+## Overriding profile settings
+
+Explicit options always win over profile defaults. Keyword lists are deep-merged, so you can override a single nested key without losing the rest:
+
+```elixir
+client = HTTPower.new(
+  base_url: "https://api.example.com",
+  profile: :high_volume_api,
+  rate_limit: [requests: 2000]  # Override only the request count
+)
+```
+
+<Tip>
+  Override individual sub-keys rather than the entire block. If you pass
+  `rate_limit: [requests: 2000]`, HTTPower merges it with the profile's
+  `rate_limit` config, preserving `strategy`, `adaptive`, and other keys.
+</Tip>
+
+---
+
+## Available profiles
+
+<Columns cols={3}>
+  <Card title=":payment_processing" icon="shield-check">
+    Conservative settings for payment gateways. Prioritizes correctness over speed.
+  </Card>
+  <Card title=":high_volume_api" icon="bolt">
+    High-throughput settings for public or internal APIs. Prioritizes throughput over latency.
+  </Card>
+  <Card title=":microservices_mesh" icon="network">
+    Balanced settings for service-to-service calls. Prevents cascade failures and retry storms.
+  </Card>
+</Columns>
+
+---
+
+### :payment_processing
+
+Optimized for Stripe, PayPal, and other payment gateways where a duplicate request can mean a duplicate charge. The key benefit is automatic double-charge prevention via request deduplication combined with an aggressive circuit breaker that stops hammering a struggling payment API.
+
+```elixir
+client = HTTPower.new(
+  base_url: "https://api.stripe.com",
+  profile: :payment_processing
+)
+
+HTTPower.post(client, "/v1/charges", body: charge_data)
+```
+
+**Full configuration:**
+
+```elixir
+[
+  # Adaptive rate limiting — reduces throughput when service is struggling
+  rate_limit: [
+    enabled: true,
+    requests: 100,        # Conservative: 100 req/min
+    per: :minute,
+    strategy: :wait,
+    max_wait_time: 5000,
+    adaptive: true
+  ],
+
+  # Aggressive circuit breaker — payment APIs must be reliable
+  circuit_breaker: [
+    enabled: true,
+    failure_threshold: 6,
+    failure_threshold_percentage: 30.0,  # Open at 30% failure rate
+    window_size: 20,
+    timeout: 30_000,          # 30s recovery window
+    half_open_requests: 3
+  ],
+
+  # Deduplication critical — prevents double charges
+  deduplicate: [
+    enabled: true,
+    ttl: 5_000               # 5s window catches slow double-clicks
+  ],
+
+  # Conservative retries for slow payment gateways
+  max_retries: 3,
+  base_delay: 2_000,         # Longer initial delay (payment APIs are slow)
+  max_delay: 30_000
+]
+```
+
+<AccordionGroup>
+  <Accordion title="Rate limiting details">
+    100 requests per minute with adaptive behavior. When the circuit breaker detects
+    the payment gateway is struggling, the rate limiter automatically reduces
+    throughput to give the service time to recover.
+  </Accordion>
+  <Accordion title="Circuit breaker details">
+    Opens after 6 failures **or** when the failure rate exceeds 30% of the last 20
+    requests — whichever comes first. Stays open for 30 seconds, then allows 3 test
+    requests to probe recovery before closing again.
+  </Accordion>
+  <Accordion title="Deduplication details">
+    Deduplicates identical requests within a 5-second window. If a user double-clicks
+    a payment button and two identical POST requests fire within 5 seconds, only the
+    first one is sent to the payment gateway. The second receives the same response.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### :high_volume_api
+
+Optimized for public APIs or internal services that need to handle large request volumes efficiently. The short deduplication window allows concurrent identical requests to share a single in-flight response, providing an effective 5× capacity boost.
+
+```elixir
+client = HTTPower.new(
+  base_url: "https://api.example.com",
+  profile: :high_volume_api
+)
+
+HTTPower.get(client, "/products")
+```
+
+**Full configuration:**
+
+```elixir
+[
+  # High-throughput rate limiting
+  rate_limit: [
+    enabled: true,
+    requests: 1000,       # High throughput: 1000 req/min
+    per: :minute,
+    strategy: :wait,
+    max_wait_time: 5000,
+    adaptive: true
+  ],
+
+  # Tolerant circuit breaker — expect some failures at high volume
+  circuit_breaker: [
+    enabled: true,
+    failure_threshold: 50,
+    failure_threshold_percentage: 50.0,  # Open at 50% failure rate
+    window_size: 100,
+    timeout: 5_000,           # Fast recovery window
+    half_open_requests: 10
+  ],
+
+  # Short dedup window — share responses across concurrent requests
+  deduplicate: [
+    enabled: true,
+    ttl: 1_000               # 1s window
+  ],
+
+  # Fast retries for quick recovery
+  max_retries: 2,
+  base_delay: 500,           # Short initial delay
+  max_delay: 10_000
+]
+```
+
+<AccordionGroup>
+  <Accordion title="Rate limiting details">
+    1000 requests per minute with adaptive behavior. The high limit supports burst
+    traffic while still protecting the upstream service.
+  </Accordion>
+  <Accordion title="Circuit breaker details">
+    Opens after 50 failures or when 50% of the last 100 requests fail. The short
+    5-second recovery window allows fast detection and recovery cycles appropriate
+    for high-volume traffic patterns.
+  </Accordion>
+  <Accordion title="Deduplication details">
+    1-second deduplication window. Under high concurrency, many requests for the
+    same resource will be funneled into a single outbound request and all callers
+    receive the same response — effectively multiplying capacity.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### :microservices_mesh
+
+Optimized for service-to-service calls in a microservices architecture. The priority is preventing cascade failures and retry storms when one service in the mesh starts degrading.
+
+```elixir
+client = HTTPower.new(
+  base_url: "https://inventory-service.internal",
+  profile: :microservices_mesh
+)
+
+HTTPower.get(client, "/stock/item-123")
+```
+
+**Full configuration:**
+
+```elixir
+[
+  # Moderate rate limiting with adaptive behavior
+  rate_limit: [
+    enabled: true,
+    requests: 500,        # Moderate: 500 req/min
+    per: :minute,
+    strategy: :wait,
+    max_wait_time: 5000,
+    adaptive: true
+  ],
+
+  # Balanced circuit breaker — protect against cascades
+  circuit_breaker: [
+    enabled: true,
+    failure_threshold: 20,
+    failure_threshold_percentage: 40.0,  # Open at 40% failure rate
+    window_size: 50,
+    timeout: 10_000,          # 10s recovery window
+    half_open_requests: 5
+  ],
+
+  # Dedup critical for retry storms in mesh
+  deduplicate: [
+    enabled: true,
+    ttl: 2_000               # 2s window catches retry storms
+  ],
+
+  # Standard retries with moderate delays
+  max_retries: 3,
+  base_delay: 1_000,
+  max_delay: 20_000
+]
+```
+
+<AccordionGroup>
+  <Accordion title="Rate limiting details">
+    500 requests per minute. When a downstream service starts degrading, adaptive
+    rate limiting coordinates with the circuit breaker to automatically reduce
+    traffic before the circuit fully opens.
+  </Accordion>
+  <Accordion title="Circuit breaker details">
+    Opens after 20 failures or when 40% of the last 50 requests fail. The 10-second
+    timeout gives downstream services time to recover from transient issues without
+    staying open so long that latency propagates across the mesh.
+  </Accordion>
+  <Accordion title="Deduplication details">
+    2-second deduplication window specifically sized to absorb retry storms. When a
+    service hiccup triggers retries across multiple callers simultaneously, only the
+    first request exits the client. All retried duplicates share its response.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Public API
+
+### HTTPower.Profiles.get/1
+
+Returns the configuration keyword list for a named profile, or an error tuple for unknown profiles.
+
+```elixir
+iex> HTTPower.Profiles.get(:payment_processing)
+{:ok, [rate_limit: [...], circuit_breaker: [...], deduplicate: [...], ...]}
+
+iex> HTTPower.Profiles.get(:invalid)
+{:error, :unknown_profile}
+```
+
+You can use this directly if you need to inspect or extend a profile programmatically:
+
+```elixir
+{:ok, profile_config} = HTTPower.Profiles.get(:microservices_mesh)
+my_config = Keyword.merge(profile_config, timeout: 10)
+client = HTTPower.new(my_config)
+```
+
+### HTTPower.Profiles.list/0
+
+Returns the list of all available profile names.
+
+```elixir
+iex> HTTPower.Profiles.list()
+[:payment_processing, :high_volume_api, :microservices_mesh]
+```

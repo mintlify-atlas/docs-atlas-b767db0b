@@ -1,0 +1,158 @@
+---
+title: Deduplication
+description: Prevent duplicate HTTP requests from causing duplicate side effects — stop double charges, duplicate orders, and race conditions at the client level.
+---
+
+Request deduplication is a client-side guard that prevents identical concurrent requests from all executing independently. When two requests with the same fingerprint arrive simultaneously, only the first executes; all duplicates wait and share the response.
+
+## How deduplication works
+
+<Steps>
+  <Step title="Fingerprinting">
+    Each request is hashed using `SHA-256` over `method + URL + body`:
+
+    ```elixir
+    HTTPower.Middleware.Dedup.hash(:post, "https://api.com/charge", body)
+    # "2cdff299ad44f172e45a54feaafdac27f230a63471469182a64049689e6bf24b"
+    ```
+  </Step>
+  <Step title="In-flight tracking">
+    The first request with a given hash is marked `:in_flight` in an ETS table. All subsequent requests with the same hash are registered as waiters.
+  </Step>
+  <Step title="Response sharing">
+    When the first request completes, its response is broadcast to all waiters via a process message. Every waiter receives the same response without making any additional network calls.
+  </Step>
+  <Step title="Automatic cleanup">
+    The completed entry is removed after 500ms—a brief window to catch race conditions where a third request arrives while the first is completing. ETS is scanned for stale entries every 5 seconds.
+  </Step>
+</Steps>
+
+## Enabling per request
+
+```elixir
+# Simplest form — boolean flag
+HTTPower.post("https://api.example.com/charge",
+  body: Jason.encode!(%{amount: 100}),
+  deduplicate: true
+)
+
+# With options
+HTTPower.post("https://api.example.com/charge",
+  body: Jason.encode!(%{amount: 100}),
+  deduplicate: [
+    enabled: true,
+    ttl: 10_000,          # How long to track the in-flight request (ms)
+    wait_timeout: 60_000  # How long waiters block before timing out (default: 30s)
+  ]
+)
+```
+
+## Global configuration
+
+Enable deduplication for all requests by default:
+
+```elixir
+# config/config.exs
+config :httpower, :deduplicate,
+  enabled: true,
+  ttl: 5_000  # Track in-flight requests for 5 seconds
+```
+
+<Warning>
+  Enabling deduplication globally affects all HTTP methods including GET. Consider whether read requests in your application should share responses—this is usually fine but may surprise you during debugging.
+</Warning>
+
+## Custom deduplication keys
+
+By default, the deduplication key is derived from the request's method, URL, and body. Override this with a custom key:
+
+```elixir
+# Use a business-level identifier instead of request content
+HTTPower.post("https://api.example.com/charge",
+  body: payment_data,
+  deduplicate: [
+    enabled: true,
+    key: "payment:#{user_id}:#{order_id}"
+  ]
+)
+```
+
+Custom keys are useful when:
+- The body contains a timestamp or nonce that would make identical requests appear unique.
+- You want to deduplicate across different endpoints or methods for the same logical operation.
+- You need to scope deduplication to a specific user or session.
+
+## Use cases
+
+### Double-click prevention
+
+User submits a payment form and double-clicks before the first request completes:
+
+```elixir
+def process_payment(user_id, amount) do
+  # Both clicks produce identical requests;
+  # only the first executes, the second waits and receives the same response
+  HTTPower.post("https://api.payment.com/charge",
+    body: Jason.encode!(%{user_id: user_id, amount: amount}),
+    deduplicate: true
+  )
+end
+```
+
+### Race condition prevention
+
+Multiple processes race to create the same resource:
+
+```elixir
+# Both tasks make the same POST; only one network request goes out
+task1 = Task.async(fn ->
+  HTTPower.post("/api/users", body: user_data, deduplicate: true)
+end)
+
+task2 = Task.async(fn ->
+  HTTPower.post("/api/users", body: user_data, deduplicate: true)
+end)
+
+[result1, result2] = Task.await_many([task1, task2])
+# Both results are identical — the response from the single network call
+```
+
+## Deduplication vs idempotency keys
+
+These two mechanisms protect against duplicates at different layers and work best together:
+
+| | Client deduplication | Idempotency keys |
+|---|---|---|
+| **Where** | Client process | Server |
+| **Scope** | Single HTTPower instance | Cross-instance, cross-restart |
+| **Duration** | Seconds | Hours or days |
+| **API support required** | No | Yes |
+| **Network call prevented** | Yes | No (server deduplicates) |
+
+**Use both for defense in depth:**
+
+```elixir
+idempotency_key = UUID.uuid4()
+
+HTTPower.post("/charges",
+  headers: %{"Idempotency-Key" => idempotency_key},  # Server-side guard
+  body: payment_data,
+  deduplicate: true,  # Client-side guard — prevents the network call entirely
+  retry_safe: true    # Safe to retry because the idempotency key protects us
+)
+```
+
+- **Client deduplication** stops duplicate requests from leaving your process.
+- **Idempotency keys** protect against duplicates that arrive via separate retries or instances.
+
+## Telemetry
+
+Deduplication emits three events:
+
+| Event | When fired |
+|---|---|
+| `[:httpower, :dedup, :execute]` | First occurrence — request will execute |
+| `[:httpower, :dedup, :wait]` | Duplicate waiting for in-flight request, includes `wait_time_ms` |
+| `[:httpower, :dedup, :cache_hit]` | Response returned from completed entry within TTL |
+
+See [Telemetry](/features/telemetry) for full event metadata and integration examples.
