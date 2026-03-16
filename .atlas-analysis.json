@@ -1,0 +1,103 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "HTTPower",
+  "projectDescription": "A production-ready Elixir HTTP client library with built-in reliability patterns including circuit breaker, rate limiting, PCI-compliant logging, and smart retries.",
+  "theme": "sequoia",
+  "primaryColor": "#94cb04",
+  "lightColor": "#545454",
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "adapters"
+            ]
+          },
+          {
+            "group": "Core Features",
+            "pages": [
+              "features/circuit-breaker",
+              "features/rate-limiting",
+              "features/retries",
+              "features/deduplication",
+              "features/pci-logging",
+              "features/telemetry"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/overview",
+              "configuration/profiles",
+              "configuration/test-mode"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/production-deployment",
+              "guides/observability",
+              "guides/migrating-from-tesla",
+              "guides/migrating-from-req"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/api",
+              "reference/changelog"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Circuit breaker with automatic failure detection and three-state (closed/open/half-open) management",
+    "Token bucket rate limiting with per-request, per-client, and global configuration",
+    "PCI-compliant logging with automatic sanitization of sensitive data (credit cards, auth tokens, etc.)",
+    "Smart retries with exponential backoff, jitter, and Retry-After header support",
+    "Request deduplication to prevent duplicate side effects from race conditions or double-clicks",
+    "Comprehensive telemetry events via Elixir's :telemetry library",
+    "Multi-adapter support: Finch (default), Req, and Tesla",
+    "Pre-built configuration profiles for payment processing, high-volume APIs, and microservices mesh",
+    "Test mode that blocks real HTTP requests with adapter-agnostic mock utilities",
+    "Correlation IDs for distributed tracing and request tracking"
+  ],
+  "publicApiSurface": [
+    "HTTPower.new/1",
+    "HTTPower.get/2,3",
+    "HTTPower.post/2,3",
+    "HTTPower.put/2,3",
+    "HTTPower.delete/2,3",
+    "HTTPower.patch/2,3",
+    "HTTPower.head/2,3",
+    "HTTPower.options/2,3",
+    "HTTPower.test_mode?/0",
+    "HTTPower.Logger.attach/0,1",
+    "HTTPower.Logger.detach/0",
+    "HTTPower.Test.setup/0",
+    "HTTPower.Test.stub/1",
+    "HTTPower.Test.json/2",
+    "HTTPower.Test.html/2",
+    "HTTPower.Test.text/2",
+    "HTTPower.Test.transport_error/2",
+    "HTTPower.Middleware.CircuitBreaker.open_circuit/1",
+    "HTTPower.Middleware.CircuitBreaker.close_circuit/1",
+    "HTTPower.Middleware.CircuitBreaker.reset_circuit/1",
+    "HTTPower.Middleware.CircuitBreaker.get_state/1",
+    "HTTPower.Middleware.RateLimiter.update_from_headers/2",
+    "HTTPower.Middleware.RateLimiter.get_info/1",
+    "HTTPower.RateLimitHeaders.parse/1",
+    "HTTPower.Profiles.get/1",
+    "HTTPower.Profiles.list/0",
+    "HTTPower.Response",
+    "HTTPower.Error"
+  ]
+}
